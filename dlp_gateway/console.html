@@ -51,14 +51,14 @@
     const [audits,report,policies,users,exceptions]=await Promise.all([
       api("/v1/admin/audits"),api("/v1/admin/report"),api("/v1/admin/policies"),api("/v1/admin/users"),api("/v1/admin/exceptions")]);
     $("stats").replaceChildren();for(const action of ["allow","review","block"]){
-      const count=report.counts.find(x=>x.action===action)?.count||0;
+      const count=report.counts[action]||0;
       const div=document.createElement("div");div.className="panel";
       const label=document.createElement("div");label.className="label";label.textContent="近 7 天 · "+action;
       const value=document.createElement("div");value.className="stat "+action;value.textContent=count;div.append(label,value);$("stats").append(div);
     }
     $("audits").replaceChildren();for(const item of audits){
       const tr=document.createElement("tr");cell(tr,item.created_at+" #"+item.id);cell(tr,item.actor+" → "+item.destination);
-      cell(tr,item.filename+" ("+item.size+" B)");cell(tr,item.action+" · "+JSON.parse(item.reasons).join(", "));
+      cell(tr,item.filename+" ("+item.size+" B)");cell(tr,item.action+" · "+item.reasons.join(", "));
       const td=cell(tr,"");td.append(button("误报",run(async()=>{await api("/v1/admin/audits/"+item.id+"/feedback",{method:"PUT",body:JSON.stringify({verdict:"false_positive"})});await refresh()})));
       $("audits").append(tr);
     }

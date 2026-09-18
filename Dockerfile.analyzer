@@ -1,0 +1,11 @@
+FROM python:3.12-slim
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+COPY pyproject.toml ./
+COPY dlp_gateway ./dlp_gateway
+RUN pip install --no-cache-dir .
+RUN useradd --uid 10001 --create-home analyzer
+USER analyzer
+EXPOSE 19090
+CMD ["uvicorn", "dlp_gateway.worker:app", "--host", "0.0.0.0", "--port", "19090"]

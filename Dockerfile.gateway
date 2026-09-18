@@ -1,0 +1,18 @@
+FROM golang:1.23-alpine AS build
+WORKDIR /src
+COPY go.mod ./
+COPY cmd ./cmd
+COPY internal ./internal
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/dlp-gateway ./cmd/dlp-gateway
+
+FROM alpine:3.21
+WORKDIR /app
+RUN addgroup -S gateway && adduser -S -G gateway gateway && mkdir -p /data && chown gateway:gateway /data
+COPY --from=build /out/dlp-gateway /app/dlp-gateway
+COPY dlp_gateway/console.html /app/dlp_gateway/console.html
+USER gateway
+ENV DLP_LISTEN_ADDRESS=0.0.0.0:18080
+ENV DLP_DB_PATH=/data/audit.json
+ENV DLP_ANALYZER_URL=http://analyzer:19090
+EXPOSE 18080
+ENTRYPOINT ["/app/dlp-gateway"]

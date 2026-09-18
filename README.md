@@ -4,36 +4,78 @@
 
 ## 中文
 
-这是一个可运行的上传环节 DLP（数据防泄漏）策略执行网关参考项目。它在文件发送到预先配置的下游系统**之前**完成检查，将不可绕过的安全规则与可选的本地大模型上下文研判结合，并记录尽量少包含敏感内容的审计信息。本项目用于作品展示和授权测试，**不是可直接用于生产环境的安全产品**。
+一个可运行的企业上传环节 DLP（数据防泄漏）参考实现。Go 网关在文件进入预配置的下游系统之前完成鉴权、解析编排、策略判定、审计和受控转发；独立 Python Worker 负责 PDF、DOCX 和图片 OCR 等复杂格式解析；可选的本地 Ollama 模型只提供上下文风险建议，不能放宽硬规则。
 
-### v0.1 已实现
+本项目用于作品展示、架构验证和授权测试，**不是可直接部署到生产环境的安全产品**。请只使用合成数据。
 
-| 模块 | 能力 |
+### 架构
+
+```text
+业务系统
+   │ Bearer 身份 + 服务端允许的目标
+   ▼
+Go Gateway (:18080)
+   ├─ 上传限制 / SHA-256 / 鉴权
+   ├─ 内置硬规则 + 动态策略 + 人员状态
+   ├─ 原子 JSON 审计存储
+   ├─ 可选本地 Ollama 建议
+   └─ 仅 allow 时转发同一份文件字节
+           │
+           └─ PDF / DOCX / 图片 ──► Python Analyzer (:19090)
+                                      有界解析 / 可选 Tesseract OCR
+```
+
+核心路径按分层边界组织：`cmd/dlp-gateway` 负责进程生命周期，`internal/httpapi` 负责传输与认证，`internal/policy` 负责决策，`internal/analyzer` 负责编排解析服务，`internal/store` 隔离持久化实现。存储层可在不改变 HTTP 和策略契约的情况下替换为 PostgreSQL。
+
+### 当前能力
+
+| 模块 | 已实现 |
 | --- | --- |
-| 上传网关 | 需认证的检查/转发接口；只能选择服务端配置的目标；文件上限 8 MiB；仅当判定为 `allow` 时转发刚刚检查过的同一份文件。 |
-| 内容提取 | UTF-8 文本、代码、CSV、JSON，文字型 PDF（最多 30 页）和 DOCX；可选 Tesseract 图片 OCR（PNG/JPEG）。不支持、加密、空白或无法解析的文件进入 `review`，不会直接放行。 |
-| 风险决策 | 内置密钥与个人信息候选特征、可配置的字面关键词策略、离职/重点人员状态，以及可选的本地 Ollama 研判。模型不能降低规则判定；已启用模型但模型不可用时进入人工复核。 |
-| 运营与审计 | SQLite 审计元数据（不保存文件正文）、策略与人员状态管理、按人员+目标+SHA-256 限定且会过期的策略例外、管理员操作记录、误报反馈及 1–90 天统计接口。 |
-| 界面 | 本地运营台 `/console`；OpenAPI 接口说明 `/docs`。 |
+| 上传网关 | Go 标准库 HTTP 服务；Bearer 身份；8 MiB 文件上限；服务端目标白名单；安全响应头；超时与优雅关闭。 |
+| 内容解析 | Go 直接处理 UTF-8 文本、代码、CSV、JSON；可选 Python Worker 处理文字型 PDF（最多 30 页）、DOCX 和 PNG/JPEG OCR。解析失败、空白、超限和不支持格式均进入 `review`。 |
+| 风险决策 | 私钥、AWS Access Key、身份证号/手机号候选特征；动态字面关键词策略；离职/重点人员状态；可选本地 Ollama。模型只可提高审查强度。 |
+| 运营闭环 | 审计列表、策略和人员状态管理、按人员+目标+SHA-256 限定的临时例外、管理员事件、误报反馈和 1–90 天统计。 |
+| 控制台 | `/console` 提供本地运营台；`/health` 提供健康检查。 |
+| 受控转发 | 只有调用 `/v1/forward/...`、判定为 `allow` 且目标预先配置时才转发；禁止任意 URL，禁止跟随重定向。 |
 
-这里的“Agent”受到刻意约束：可选的本地模型只读取一段有长度上限的文本并给出风险等级，不能自行修改策略、批准例外或选择外发目标。未启用 Ollama 时，系统明确以纯规则模式运行。
+### 快速开始
 
-### 本地运行
+需要 Go 1.23+。Python 3.11+ 仅在启用复杂文档解析 Worker 或运行 Python 回归测试时需要。
 
-需要 Python 3.11 或更高版本。
+1. 准备配置。示例密钥不能直接使用，管理员和客户端密钥必须不同且至少 24 个字符：
+
+```bash
+cp .env.example .env
+python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+```
+
+`.env` 已被 Git 忽略，不要提交。Go 标准库不会自动读取 `.env`，请先把变量加载到当前终端：
+
+```bash
+set -a
+source .env
+set +a
+```
+
+2. 启动 Go 网关：
+
+```bash
+go run ./cmd/dlp-gateway
+```
+
+此时为 rules-only 模式：受支持的 UTF-8 文本可正常检查，PDF、DOCX、图片及未知格式会失败关闭为 `review`。
+
+3. 可选：在另一个终端启动 Python Analyzer，再重启已配置 `DLP_ANALYZER_URL=http://127.0.0.1:19090` 的网关：
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -e ".[dev]"
-cp .env.example .env
-# 把两个示例密钥分别替换为不同的随机值，长度至少 24 个字符。
-# .env 已被 Git 忽略，不要上传。
-.venv/bin/uvicorn dlp_gateway.main:app --env-file .env --host 127.0.0.1 --port 18080
+.venv/bin/uvicorn dlp_gateway.worker:app --host 127.0.0.1 --port 19090
 ```
 
-可分别运行 `python3 -c 'import secrets; print(secrets.token_urlsafe(32))'` 生成密钥。多个上传身份可通过 `DLP_CLIENT_KEYS_JSON` 配置为“身份 ID → 不同密钥”的 JSON 对象；身份由密钥确定，不接受客户端自行填写的身份请求头。默认提供 `internal-demo` 和 `external-demo` 两个**仅检查**的目标。只有配置了目标 URL、显式调用 `/v1/forward/...` 且结果为 `allow`，文件才会被转发。
+图片 OCR 还需安装 `pip install -e ".[ocr]"` 和系统的 `tesseract`。缺少 OCR 依赖时图片进入 `review`。
 
-打开 [http://127.0.0.1:18080/console](http://127.0.0.1:18080/console)，输入管理员密钥。运营台只在当前页面会话中使用该密钥。用自造的测试文件试一次检查：
+4. 打开 [http://127.0.0.1:18080/console](http://127.0.0.1:18080/console)，输入管理员密钥。用只含虚构内容的文件测试：
 
 ```bash
 curl -sS -H "Authorization: Bearer YOUR_CLIENT_KEY" \
@@ -41,88 +83,137 @@ curl -sS -H "Authorization: Bearer YOUR_CLIENT_KEY" \
   http://127.0.0.1:18080/v1/check/external-demo
 ```
 
-请自行创建仅包含虚构内容的 `synthetic.txt`。例如，文件内的 `Call 13800138000` 会在外部目标触发 `review`；虚构的 `-----BEGIN PRIVATE KEY-----` 标记会触发 `block`。这些只是候选特征，不代表识别出了真实密钥或已验证的身份信息。不要向演示实例上传真实企业或个人敏感数据。
+例如 `Call 13800138000` 会在外部目标触发 `review`；虚构的 `-----BEGIN PRIVATE KEY-----` 标记会触发 `block`。这些只是候选特征，不证明存在真实秘密或个人身份。
 
-如需演示真实转发，在 `DLP_DESTINATIONS_JSON` 中配置固定下游 URL，例如 `{"internal-demo":{"kind":"internal","url":"http://127.0.0.1:9000/upload"}}`，再调用 `/v1/forward/internal-demo`。非本机目标必须使用 HTTPS；接收服务需自行准备。网关不接受客户端指定任意 URL，也不会跟随下游重定向；下游返回非 2xx、重定向或超时均报错，不标记为已转发，也不会将下游响应正文返回给调用方。
+### Docker Compose
 
-可选模型：在本机启动 Ollama、拉取适用的 Qwen 模型，设置 `DLP_OLLAMA_MODEL=qwen2.5:7b` 后重启。网关最多向本机环回模型服务发送 2,000 个字符，超时为 4 秒；这段文字仍可能包含敏感内容，因此模型服务也必须保持本地且受控。配置了模型但服务不可用时，上传进入复核。图片 OCR 还需安装 `pip install -e ".[ocr]"` 和系统的 `tesseract` 命令；未安装时图片进入复核。
+准备包含随机密钥的 `.env` 后运行：
 
-Docker 演示：用真实随机密钥准备 `.env` 后运行 `docker compose up --build`。服务仅绑定 `127.0.0.1:18080`（容器内部仍使用 8080）；容器配置不包含 TLS、SSO、反向代理请求体限制、解析沙箱或生产加固。
-
-### 接口与人工闭环
-
-1. 受信任的业务集成使用对应人员密钥认证，以 multipart 字段 `file` 调用 `POST /v1/check/{destination}` 或 `POST /v1/forward/{destination}`。
-2. 返回结果为 `allow`、`review` 或 `block`，同时给出原因**代码**、SHA-256 摘要和审计 ID。`review` 和 `block` 绝不转发。
-3. 管理员通过 `/v1/admin/...` 管理字面关键词策略和人员状态；这些管理操作另有操作记录。
-4. 客户端可针对命中策略的审计 ID 调用 `POST /v1/exceptions`，提交 `audit_id` 和 `justification`。管理员批准 1–24 小时或驳回。批准后，同一身份须向同一目标重新上传**完全相同的文件字节**。例外仅跳过可配置的策略命中，不跳过内置密钥/人员硬规则、个人信息复核或模型故障。
-5. 管理员可通过 `PUT /v1/admin/audits/{id}/feedback` 将告警标记为 `false_positive`。`/v1/admin/report` 汇总待复盘的策略候选，**不会自动修改阈值或策略**。
-
-运营台覆盖常见操作，完整请求与响应结构见 `/docs`。数据库仍会保存文件名、人员 ID 和申请理由，这些元数据本身可能敏感；实际使用时须保护数据库并制定保留、轮换及删除规则。
-
-### 判定流程
-
-```text
-已认证身份 + 服务端允许的目标
-  → 有上限的文件读取 → 格式解析
-  → 不可绕过的内置规则 + 配置策略
-  → 可选本地模型建议（只能提高审查强度）
-  → 审计元数据 → 放行 / 人工复核 / 阻断
-  → 放行 + 显式转发 + 已配置接收端 → 同一文件字节发往下游
+```bash
+docker compose up --build
 ```
 
-### 安全边界与未实现能力
+Compose 启动 Go Gateway 和 Python Analyzer 两个非 root、只读根文件系统的服务。网关只映射到 `127.0.0.1:18080`，不会占用 `8080`；Analyzer 只在 Compose 内部网络暴露。审计数据保存在命名卷。
 
-- 这是供授权企业测试使用的**参考实现**，不是透明流量拦截器。业务系统必须主动接入；绕过网关的上传也会绕过检查。
-- 共享人员密钥只适合演示。生产使用前需要 mTLS/SSO 或签名的工作负载身份、应用级权限、密钥轮换、审批分权，以及加密并有保留期限的审计存储。
-- 解析器和 OCR 在同一进程内运行，恶意文件可能消耗 CPU 或内存。应改为有时间/内存配额的隔离解析任务，并增加恶意软件扫描与反向代理请求体限制。框架可能在应用检查 8 MiB 限制**之前**将 multipart 内容暂存到磁盘。提取文本超过 100,000 字符会进入复核而不是只检查前半部分后放行；某些格式特性仍可能完全未提取，不能将结果视为全覆盖。
-- 扫描件 PDF 尚不支持页面 OCR（目前只支持独立图片 OCR）；嵌套压缩包、XLSX/PPTX、加密文件、未知编码及复杂嵌入内容均未解析，进入复核。原生 PDF/DOCX 的提取也不能保证完整。
-- 正则特征会误报，模型可能误判或受文件中指令影响，二者都不应独自决定不可逆操作。可配置的策略阻断可申请复核；演示版内置的外发密钥和离职人员硬规则不可通过例外绕过。
-- SQLite 是单实例演示存储；尚无 Elasticsearch、消息队列、LDAP/HR 自动同步、高可用、多租户隔离、合规映射或自动周报邮件。统计接口可供运营人员自行导出。
-- 公开 issue、测试数据、截图和提交中不得出现真实敏感数据。接入托管模型前应另行评估隐私与数据处理要求。
+### API 工作流
 
-信任边界和部署检查清单见 [SECURITY.md](SECURITY.md)。运行测试：`.venv/bin/python -m pytest -q`。
+1. 业务集成以对应身份密钥调用 `POST /v1/check/{destination}` 或 `POST /v1/forward/{destination}`，multipart 字段名为 `file`。
+2. 返回 `allow`、`review` 或 `block`，以及原因代码、SHA-256 和审计 ID。`review` 与 `block` 永不转发。
+3. 管理员通过 `/v1/admin/...` 管理策略、人员状态、例外、反馈、审计和报告。
+4. 对可配置策略命中的审计，客户端可向 `POST /v1/exceptions` 提交 `audit_id` 和理由；批准只对同一身份、目标和完全相同的文件字节有效，且不能绕过秘密、人员、个人信息或模型故障规则。
+5. 误报反馈只生成策略优化候选，不自动修改策略。
 
-### 后续里程碑
+默认目标 `internal-demo` 和 `external-demo` 仅检查。要演示转发，在 `DLP_DESTINATIONS_JSON` 中配置固定 URL，例如 `{"internal-demo":{"kind":"internal","url":"http://127.0.0.1:9000/upload"}}`。非本机目标必须使用 HTTPS。下游非 2xx、重定向或超时均不会标记为成功，也不会把下游响应正文返回客户端。
 
-1. 解析任务沙箱化，增加完整覆盖的分块提取、PDF 图片 OCR、内容类型核验和端到端上传大小限制。
-2. 接入签名身份/HR 同步、职责分离审批、审计保留与加密及 RBAC。
-3. 增加大文件异步隔离、可靠的下游幂等投递、Elasticsearch/OpenSearch 导出、趋势面板与定期报表。
-4. 用合成或已获同意的标注样本评估模型；策略优化须经人工批准并通过回归测试。
+### 本地模型
 
-MIT 许可。贡献内容应使用合成数据并附上测试。
+在本机启动 Ollama 并设置 `DLP_OLLAMA_MODEL=qwen2.5:7b` 后，Go 网关最多发送 2,000 个字符到环回模型服务，超时为 4 秒。文本仍可能敏感，因此模型服务必须保持本地且受控。已配置模型但服务不可用时，上传进入 `review`。模型输出只能提升审查强度，不能覆盖硬阻断或批准例外。
+
+### 测试
+
+```bash
+go test ./...
+go build ./cmd/dlp-gateway
+.venv/bin/python -m pytest -q
+```
+
+GitHub Actions 同时运行 Go 测试、Go 构建和 Python 回归测试。测试数据全部为合成内容。
+
+### 安全边界
+
+- 这是主动接入的策略执行点，不是透明流量拦截器；绕过网关的上传也会绕过检查。
+- 当前 Bearer 密钥与本地控制台只适合演示。生产环境需要 mTLS/SSO 或签名工作负载身份、RBAC、职责分离、密钥轮换、TLS 和集中式密钥管理。
+- Python Worker 与网关分进程，但当前容器配置仍不是强沙箱。生产环境需要解析任务队列、CPU/内存/时间配额、恶意软件扫描、内容类型核验和反向代理级请求限制。
+- 当前原子 JSON 存储提供 `0600` 权限、临时文件写入、`fsync` 和原子重命名，只适合单实例演示。它没有事务数据库的并发、查询、备份、加密和高可用能力；生产环境应替换为 PostgreSQL 或其他受管数据库，并配置审计保留与删除策略。
+- PDF 扫描页 OCR、XLSX/PPTX、嵌套压缩包、加密文档和复杂嵌入内容尚未覆盖，均应进入复核。格式提取不等于内容全覆盖。
+- 正则会误报，模型会误判或受文档中指令干扰。任何策略优化都应人工批准并经过回归测试。
+- 不要在公开 issue、日志、截图、提交或演示实例中使用真实企业文件、个人数据、密钥或客户数据。
+
+更多信任边界见 [SECURITY.md](SECURITY.md)。
+
+### 路线图
+
+1. 将解析任务迁入带资源配额的隔离队列，增加 PDF 页面 OCR、XLSX/PPTX、文件类型校验和恶意软件扫描。
+2. 用 PostgreSQL、OIDC/mTLS、RBAC、审计保留与加密替换演示组件。
+3. 增加可靠的异步大文件隔离、幂等下游投递、OpenSearch/Elasticsearch 导出和周期报告。
+4. 使用合成或明确授权的标注样本评估模型，建立人工审批的策略优化回归闭环。
+
+MIT License。贡献内容须使用合成数据并附测试。
 
 ## English
 
-A runnable reference implementation of an upload-time DLP policy enforcement point. It checks files **before** a configured downstream upload, combines hard safety rules with optional local LLM context review, and records a privacy-minimized audit trail. Built as a portfolio/demo project, **not a production security product**.
+A runnable reference implementation of an enterprise upload-time DLP enforcement point. The Go gateway performs authentication, parser orchestration, policy decisions, audit recording, and controlled forwarding before a file reaches a configured downstream system. A separate Python worker handles PDF, DOCX, and optional image OCR. An optional local Ollama model supplies context risk advice only and cannot relax hard rules.
 
-## What works in v0.1
+This repository is intended for portfolio demonstration, architecture evaluation, and authorized testing. It is **not a production-ready security product**. Use synthetic data only.
 
-| Area | Implementation |
+### Architecture
+
+```text
+business application
+   │ Bearer identity + server-allowlisted destination
+   ▼
+Go Gateway (:18080)
+   ├─ upload bounds / SHA-256 / authentication
+   ├─ hard guards + dynamic policies + personnel state
+   ├─ atomic JSON audit store
+   ├─ optional local Ollama advisory
+   └─ forwards the exact bytes only after allow
+           │
+           └─ PDF / DOCX / image ──► Python Analyzer (:19090)
+                                      bounded parsing / optional Tesseract OCR
+```
+
+The primary path is split by responsibility: `cmd/dlp-gateway` owns process lifecycle, `internal/httpapi` owns transport and authentication, `internal/policy` owns decisions, `internal/analyzer` orchestrates the parser service, and `internal/store` isolates persistence. The store can later be replaced with PostgreSQL without changing HTTP or policy contracts.
+
+### Current capabilities
+
+| Area | Implemented |
 | --- | --- |
-| Upload gateway | Authenticated check/forward endpoints; only server-configured destinations; up to 8 MiB; forward the exact bytes checked, and only on `allow`. |
-| Extraction | UTF-8 text/code/CSV/JSON, text-based PDF (30 pages max), DOCX; optional PNG/JPEG OCR with Tesseract. Unsupported, encrypted, empty and unreadable files go to `review`. |
-| Decision | Built-in secret/PII candidate signals, configurable literal-keyword policies, departing/privileged user status, optional local Ollama assessment. Rules cannot be downgraded by the model. Model outages require review when enabled. |
-| Operations | SQLite audit metadata (no file bodies), policy and personnel controls, expiring actor+destination+SHA-256 policy exceptions, admin action log, false-positive feedback and 1–90-day report query. |
-| UI | Local admin console at `/console`; OpenAPI docs at `/docs`. |
+| Upload gateway | Go standard-library HTTP server; Bearer identity; 8 MiB file limit; server-side destination allowlist; security headers; timeouts and graceful shutdown. |
+| Extraction | Go handles UTF-8 text, code, CSV, and JSON directly. The optional Python worker handles text-based PDF (up to 30 pages), DOCX, and PNG/JPEG OCR. Parse failures, blank input, over-limit input, and unsupported formats require `review`. |
+| Decision | Private-key, AWS key, ID/phone candidate signals; dynamic literal policies; departing/privileged personnel state; optional local Ollama. Model output may escalate only. |
+| Operations | Audit list, policy and personnel controls, expiring actor+destination+SHA-256 exceptions, admin events, false-positive feedback, and 1–90-day reports. |
+| Console | Local operator console at `/console` and liveness at `/health`. |
+| Controlled forwarding | Forwarding requires an explicit `/v1/forward/...` call, an `allow` decision, and a preconfigured receiver. Arbitrary URLs and redirects are rejected. |
 
-The “Agent” is deliberately constrained: an optional local model reviews a bounded text excerpt and returns a risk category. It does not autonomously change policy, grant exceptions or choose where data goes. Without Ollama the gateway runs in clearly labeled `rules-only` mode.
+### Quick start
 
-## Run locally
+Go 1.23+ is required. Python 3.11+ is needed only for the rich-document Analyzer or Python regression tests.
 
-Requires Python 3.11+.
+1. Prepare configuration. Never use the placeholder keys; the admin and client keys must be distinct and at least 24 characters:
+
+```bash
+cp .env.example .env
+python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+```
+
+`.env` is ignored by Git. The Go standard library does not load it automatically, so export it into the current shell:
+
+```bash
+set -a
+source .env
+set +a
+```
+
+2. Start the Go gateway:
+
+```bash
+go run ./cmd/dlp-gateway
+```
+
+This is rules-only mode: supported UTF-8 text is inspected, while PDF, DOCX, images, and unknown formats fail closed to `review`.
+
+3. Optional: start the Python Analyzer in another terminal, then restart the gateway with `DLP_ANALYZER_URL=http://127.0.0.1:19090` configured:
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -e ".[dev]"
-cp .env.example .env
-# Replace BOTH example keys with DIFFERENT random values, at least 24 characters each.
-# Keep .env private; it is ignored by Git.
-.venv/bin/uvicorn dlp_gateway.main:app --env-file .env --host 127.0.0.1 --port 18080
+.venv/bin/uvicorn dlp_gateway.worker:app --host 127.0.0.1 --port 19090
 ```
 
-Generate each key with `python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`. For multiple actors, set `DLP_CLIENT_KEYS_JSON` to a JSON object mapping actor IDs to distinct keys; actor identity comes from the key, not a client-supplied header. The example config provides two **check-only** destinations by default (`internal-demo`, `external-demo`). No bytes leave the gateway unless a destination URL is configured and `/v1/forward/...` is explicitly called after an `allow` decision.
+Image OCR additionally requires `pip install -e ".[ocr]"` and the system `tesseract` binary. Images require `review` when OCR is unavailable.
 
-Open [http://127.0.0.1:18080/console](http://127.0.0.1:18080/console) and enter the admin key. The console keeps it only in the page session. To try a synthetic file:
+4. Open [http://127.0.0.1:18080/console](http://127.0.0.1:18080/console) and enter the admin key. Try a file containing invented text only:
 
 ```bash
 curl -sS -H "Authorization: Bearer YOUR_CLIENT_KEY" \
@@ -130,52 +221,59 @@ curl -sS -H "Authorization: Bearer YOUR_CLIENT_KEY" \
   http://127.0.0.1:18080/v1/check/external-demo
 ```
 
-Use a locally created file with invented text. For example, a file containing `Call 13800138000` yields `review` at an external destination; an invented `-----BEGIN PRIVATE KEY-----` marker yields `block`. These are candidate signals, **not** proof of a real secret or a validated identity number. Do not submit actual corporate or personal data to a demo instance.
+For example, `Call 13800138000` triggers `review` at an external destination; an invented `-----BEGIN PRIVATE KEY-----` marker triggers `block`. These are candidate signals, not proof of a real secret or identity.
 
-To exercise actual forwarding, put a fixed downstream URL in `DLP_DESTINATIONS_JSON`, for example `{"internal-demo":{"kind":"internal","url":"http://127.0.0.1:9000/upload"}}`, and call `/v1/forward/internal-demo`. HTTPS is required for non-loopback targets. Configure the receiver yourself; the gateway does not discover or proxy arbitrary client URLs. A downstream non-2xx/redirect or timeout returns an error and is **not** marked forwarded. The downstream response body is never returned.
+### Docker Compose
 
-Optional model: run Ollama locally, pull an appropriate Qwen model, set `DLP_OLLAMA_MODEL=qwen2.5:7b`, then restart. Only a maximum 2,000-character excerpt is sent to the loopback model service, with a 4-second timeout; that excerpt can still contain sensitive content, so keep Ollama local and controlled. If configured but unavailable, uploads require review. OCR requires `pip install -e ".[ocr]"` and the system `tesseract` binary. Unavailable OCR means image uploads require review.
+After preparing `.env` with random keys, run:
 
-Docker demo: `docker compose up --build` after creating `.env` with real random keys. It binds only to `127.0.0.1:18080` (the container still listens on 8080); no TLS, SSO, upload-size reverse proxy, parser sandbox or production hardening is included.
-
-## API / workflow
-
-1. A trusted integration authenticates with its actor-specific client key and calls `POST /v1/check/{destination}` or `POST /v1/forward/{destination}` with multipart field `file`.
-2. A decision contains `allow`, `review` or `block`, reason **codes**, a SHA-256 hash and an audit ID. `review` and `block` never forward.
-3. Administrators manage literal keyword policies and personnel status with `/v1/admin/...`; all such changes have an admin-event record.
-4. A client may request an exception for a policy-hit audit using `POST /v1/exceptions` with `audit_id` and `justification`. An administrator approves for 1–24 hours or rejects it. The client re-uploads the *same bytes* to the *same destination* under the *same actor key*. An approval bypasses only policy hits, never hard secret/personnel guards, PII review or model outages.
-5. Administrators mark an audit as `false_positive` via `PUT /v1/admin/audits/{id}/feedback`. `/v1/admin/report` counts policy candidates for review; no automatic threshold or rule mutation occurs.
-
-The console implements common operations; the complete schema is available at `/docs`. Database rows retain filenames, actor IDs and approval justifications, which may themselves be sensitive. Protect and rotate the database, and set a retention/deletion policy for your environment.
-
-## Decision flow
-
-```text
-authenticated actor + allowlisted destination
-  → bounded multipart read → format extraction
-  → non-bypassable guards + configured policies
-  → optional local model advisory (may escalate only)
-  → audit metadata → allow / review / block
-  → allow + explicit forward + configured receiver → same bytes upstream
+```bash
+docker compose up --build
 ```
 
-## Security boundaries and limitations
+Compose starts the Go Gateway and Python Analyzer as non-root services with read-only root filesystems. The gateway binds only to `127.0.0.1:18080` and does not use `8080`. The Analyzer is exposed only on the Compose network, and audit state lives in a named volume.
 
-- This is a **reference implementation** for authorized enterprise testing, not a transparent network interceptor. Applications must intentionally integrate the endpoint; bypassing it bypasses DLP.
-- The shared actor keys are suitable only for a demo integration. Before production, add mTLS/SSO or signed workload identity, per-application authorization, key rotation, robust approval separation, and encrypted/retained audit storage.
-- Parsers and OCR run in-process; hostile documents may consume CPU/memory. Put parsing in a sandboxed worker with time/memory quotas, malware scanning, and reverse-proxy request limits. Multipart spooling can use disk *before* the application enforces its 8 MiB file limit. Extraction exceeding 100,000 characters requires review rather than a partial allow. Some format features are not extracted at all, so do not assume complete coverage.
-- PDF scan-only pages need OCR (currently image OCR only); nested archives, XLSX/PPTX, encrypted files, unknown encodings and complex embedded content are not extracted. They go to review. Native PDF/DOCX extraction is not guaranteed complete.
-- Regex signals can be false positives; a model can misclassify or follow document-borne instructions. Neither should be a sole basis for irreversible decisions. Configurable policy blocks are reviewable; built-in external secret/departing guards remain non-bypassable in this demo.
-- SQLite is a single-instance demo backend; there is no Elasticsearch, queue, LDAP/HR synchronization, HA, tenant isolation, compliance mapping or automatic weekly mailer. The report endpoint supplies aggregates for an operator to export.
-- Avoid real sensitive data in public issues, test fixtures, screenshots and commits. Do not enable hosted model APIs without a separate privacy/data-processing assessment.
+### API workflow
 
-See [SECURITY.md](SECURITY.md) for the trust model and deployment checklist. Run tests with `.venv/bin/python -m pytest -q`.
+1. A business integration authenticates with its actor key and calls `POST /v1/check/{destination}` or `POST /v1/forward/{destination}` using multipart field `file`.
+2. The result is `allow`, `review`, or `block` with reason codes, SHA-256, and an audit ID. `review` and `block` never forward.
+3. Administrators use `/v1/admin/...` to manage policies, personnel state, exceptions, feedback, audits, and reports.
+4. For a configurable policy hit, a client may submit `audit_id` and a justification to `POST /v1/exceptions`. Approval is restricted to the same actor, destination, and exact file bytes; it cannot bypass secret, personnel, personal-data, or model-outage guards.
+5. False-positive feedback creates policy-tuning candidates but never mutates policy automatically.
 
-## Next milestones
+The default `internal-demo` and `external-demo` destinations are check-only. To demonstrate forwarding, configure a fixed URL in `DLP_DESTINATIONS_JSON`, for example `{"internal-demo":{"kind":"internal","url":"http://127.0.0.1:9000/upload"}}`. Non-loopback receivers require HTTPS. Downstream non-2xx responses, redirects, and timeouts are not marked successful, and the downstream response body is never returned.
 
-1. Sandbox parsers and add full-coverage chunked extraction, OCR for PDF images, content-type verification and end-to-end upload-size enforcement.
-2. Add a signed identity/HR connector and separation-of-duties approval with audit retention, encryption and RBAC.
-3. Add asynchronous large-file quarantine, resilient upstream idempotency, Elasticsearch/OpenSearch export, trend dashboards and scheduled reports.
-4. Calibrate model evaluation against synthetic/consented labeled cases; human-approved policy tuning only, with regression tests.
+### Local model
 
-MIT licensed. Contributions should use synthetic data and include tests.
+Run Ollama locally and set `DLP_OLLAMA_MODEL=qwen2.5:7b`. The Go gateway sends at most a 2,000-character excerpt to the loopback model endpoint with a four-second timeout. The excerpt can still be sensitive, so keep the model local and controlled. When a configured model is unavailable, the result requires `review`. Model output can only increase review strength; it cannot override hard blocks or grant exceptions.
+
+### Tests
+
+```bash
+go test ./...
+go build ./cmd/dlp-gateway
+.venv/bin/python -m pytest -q
+```
+
+GitHub Actions runs Go tests, a Go build, and Python regression tests. All fixtures are synthetic.
+
+### Security boundaries
+
+- This is an explicitly integrated policy enforcement point, not a transparent network interceptor. Uploads that bypass it also bypass inspection.
+- Bearer keys and the local console are demo controls. Production requires mTLS/SSO or signed workload identity, RBAC, separation of duties, key rotation, TLS, and centralized secret management.
+- The Python worker is a separate process, but the current containers are not a strong parser sandbox. Production needs a queued parser boundary, CPU/memory/time quotas, malware scanning, content-type verification, and reverse-proxy request limits.
+- The atomic JSON store uses `0600` permissions, a temporary file, `fsync`, and atomic rename. It is a single-instance demo store without a transactional database's concurrency, query, backup, encryption, or HA properties. Replace it with PostgreSQL or another managed database and define audit retention/deletion.
+- OCR for scanned PDF pages, XLSX/PPTX, nested archives, encrypted documents, and complex embedded content are not covered. Such inputs should require review. Format extraction is not proof of full content coverage.
+- Regex signals can produce false positives; models can misclassify or follow document-borne instructions. Policy changes require human approval and regression tests.
+- Never place real corporate documents, personal data, secrets, or customer-derived material in public issues, logs, screenshots, commits, or demo instances.
+
+See [SECURITY.md](SECURITY.md) for additional trust boundaries.
+
+### Roadmap
+
+1. Move parsing into a resource-limited queue; add PDF page OCR, XLSX/PPTX, file-type verification, and malware scanning.
+2. Replace demo controls with PostgreSQL, OIDC/mTLS, RBAC, encrypted audit retention, and separation of duties.
+3. Add asynchronous large-file quarantine, idempotent downstream delivery, OpenSearch/Elasticsearch export, and scheduled reporting.
+4. Evaluate the model with synthetic or explicitly consented labeled samples and require human-approved, regression-tested policy tuning.
+
+MIT licensed. Contributions must use synthetic data and include tests.
