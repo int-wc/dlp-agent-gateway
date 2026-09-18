@@ -28,17 +28,17 @@ python3 -m venv .venv
 cp .env.example .env
 # 把两个示例密钥分别替换为不同的随机值，长度至少 24 个字符。
 # .env 已被 Git 忽略，不要上传。
-.venv/bin/uvicorn dlp_gateway.main:app --env-file .env --host 127.0.0.1 --port 8080
+.venv/bin/uvicorn dlp_gateway.main:app --env-file .env --host 127.0.0.1 --port 18080
 ```
 
 可分别运行 `python3 -c 'import secrets; print(secrets.token_urlsafe(32))'` 生成密钥。多个上传身份可通过 `DLP_CLIENT_KEYS_JSON` 配置为“身份 ID → 不同密钥”的 JSON 对象；身份由密钥确定，不接受客户端自行填写的身份请求头。默认提供 `internal-demo` 和 `external-demo` 两个**仅检查**的目标。只有配置了目标 URL、显式调用 `/v1/forward/...` 且结果为 `allow`，文件才会被转发。
 
-打开 [http://127.0.0.1:8080/console](http://127.0.0.1:8080/console)，输入管理员密钥。运营台只在当前页面会话中使用该密钥。用自造的测试文件试一次检查：
+打开 [http://127.0.0.1:18080/console](http://127.0.0.1:18080/console)，输入管理员密钥。运营台只在当前页面会话中使用该密钥。用自造的测试文件试一次检查：
 
 ```bash
 curl -sS -H "Authorization: Bearer YOUR_CLIENT_KEY" \
   -F 'file=@synthetic.txt;type=text/plain' \
-  http://127.0.0.1:8080/v1/check/external-demo
+  http://127.0.0.1:18080/v1/check/external-demo
 ```
 
 请自行创建仅包含虚构内容的 `synthetic.txt`。例如，文件内的 `Call 13800138000` 会在外部目标触发 `review`；虚构的 `-----BEGIN PRIVATE KEY-----` 标记会触发 `block`。这些只是候选特征，不代表识别出了真实密钥或已验证的身份信息。不要向演示实例上传真实企业或个人敏感数据。
@@ -47,7 +47,7 @@ curl -sS -H "Authorization: Bearer YOUR_CLIENT_KEY" \
 
 可选模型：在本机启动 Ollama、拉取适用的 Qwen 模型，设置 `DLP_OLLAMA_MODEL=qwen2.5:7b` 后重启。网关最多向本机环回模型服务发送 2,000 个字符，超时为 4 秒；这段文字仍可能包含敏感内容，因此模型服务也必须保持本地且受控。配置了模型但服务不可用时，上传进入复核。图片 OCR 还需安装 `pip install -e ".[ocr]"` 和系统的 `tesseract` 命令；未安装时图片进入复核。
 
-Docker 演示：用真实随机密钥准备 `.env` 后运行 `docker compose up --build`。服务仅绑定 `127.0.0.1:8080`；容器配置不包含 TLS、SSO、反向代理请求体限制、解析沙箱或生产加固。
+Docker 演示：用真实随机密钥准备 `.env` 后运行 `docker compose up --build`。服务仅绑定 `127.0.0.1:18080`（容器内部仍使用 8080）；容器配置不包含 TLS、SSO、反向代理请求体限制、解析沙箱或生产加固。
 
 ### 接口与人工闭环
 
@@ -117,17 +117,17 @@ python3 -m venv .venv
 cp .env.example .env
 # Replace BOTH example keys with DIFFERENT random values, at least 24 characters each.
 # Keep .env private; it is ignored by Git.
-.venv/bin/uvicorn dlp_gateway.main:app --env-file .env --host 127.0.0.1 --port 8080
+.venv/bin/uvicorn dlp_gateway.main:app --env-file .env --host 127.0.0.1 --port 18080
 ```
 
 Generate each key with `python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`. For multiple actors, set `DLP_CLIENT_KEYS_JSON` to a JSON object mapping actor IDs to distinct keys; actor identity comes from the key, not a client-supplied header. The example config provides two **check-only** destinations by default (`internal-demo`, `external-demo`). No bytes leave the gateway unless a destination URL is configured and `/v1/forward/...` is explicitly called after an `allow` decision.
 
-Open [http://127.0.0.1:8080/console](http://127.0.0.1:8080/console) and enter the admin key. The console keeps it only in the page session. To try a synthetic file:
+Open [http://127.0.0.1:18080/console](http://127.0.0.1:18080/console) and enter the admin key. The console keeps it only in the page session. To try a synthetic file:
 
 ```bash
 curl -sS -H "Authorization: Bearer YOUR_CLIENT_KEY" \
   -F 'file=@synthetic.txt;type=text/plain' \
-  http://127.0.0.1:8080/v1/check/external-demo
+  http://127.0.0.1:18080/v1/check/external-demo
 ```
 
 Use a locally created file with invented text. For example, a file containing `Call 13800138000` yields `review` at an external destination; an invented `-----BEGIN PRIVATE KEY-----` marker yields `block`. These are candidate signals, **not** proof of a real secret or a validated identity number. Do not submit actual corporate or personal data to a demo instance.
@@ -136,7 +136,7 @@ To exercise actual forwarding, put a fixed downstream URL in `DLP_DESTINATIONS_J
 
 Optional model: run Ollama locally, pull an appropriate Qwen model, set `DLP_OLLAMA_MODEL=qwen2.5:7b`, then restart. Only a maximum 2,000-character excerpt is sent to the loopback model service, with a 4-second timeout; that excerpt can still contain sensitive content, so keep Ollama local and controlled. If configured but unavailable, uploads require review. OCR requires `pip install -e ".[ocr]"` and the system `tesseract` binary. Unavailable OCR means image uploads require review.
 
-Docker demo: `docker compose up --build` after creating `.env` with real random keys. It binds only to `127.0.0.1:8080`; no TLS, SSO, upload-size reverse proxy, parser sandbox or production hardening is included.
+Docker demo: `docker compose up --build` after creating `.env` with real random keys. It binds only to `127.0.0.1:18080` (the container still listens on 8080); no TLS, SSO, upload-size reverse proxy, parser sandbox or production hardening is included.
 
 ## API / workflow
 
