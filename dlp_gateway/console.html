@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DLP Gateway · 运营台</title>
+  <style>
+    :root{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#13272b;background:#f4f7f5}
+    *{box-sizing:border-box}body{margin:0}header{background:#102d30;color:#fff;padding:32px max(24px,calc((100vw - 1120px)/2))}
+    header h1{margin:0 0 8px;font-size:30px;letter-spacing:-.03em}header p{margin:0;color:#bdcfcc}
+    main{max-width:1120px;margin:28px auto;padding:0 20px 60px}.toolbar,.grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
+    .panel{background:#fff;border:1px solid #dce7e3;border-radius:16px;padding:20px;box-shadow:0 8px 28px #123b3410;margin-bottom:18px}
+    .toolbar{align-items:end}.toolbar .panel{margin:0}.label{font-size:12px;font-weight:700;letter-spacing:.08em;color:#57746e;text-transform:uppercase}
+    h2{margin:4px 0 16px;font-size:20px}h3{font-size:15px;margin:18px 0 8px}input,select,button{font:inherit;border-radius:9px;padding:10px 12px}
+    input,select{width:100%;border:1px solid #bfcfc9;background:#fff}button{border:0;background:#126e61;color:#fff;font-weight:650;cursor:pointer}
+    button.secondary{background:#e9f2ee;color:#164a42}button.danger{background:#9d4a37}button:disabled{opacity:.5;cursor:default}
+    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.row>*{flex:1}.row button{flex:0 0 auto}.muted{color:#66817a;font-size:13px}
+    .stat{font-size:32px;font-weight:750;margin-top:8px}.allow{color:#188166}.review{color:#ad6f19}.block{color:#b14e39}
+    table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:11px 8px;border-bottom:1px solid #e7eeeb;vertical-align:top}
+    th{color:#5a756e;font-weight:600}td{overflow-wrap:anywhere}.scroll{overflow:auto}.pill{padding:4px 8px;border-radius:20px;background:#eaf1ee;white-space:nowrap}
+    small{color:#647d77}.notice{min-height:20px;margin:12px 0;color:#9d4a37}form{display:grid;gap:10px}.summary{font-size:14px}
+  </style>
+</head>
+<body>
+<header><div class="label" style="color:#7fd8bd">LOCAL REFERENCE · v0.1</div><h1>DLP 智能上传网关</h1><p>策略执行、审计和人工复核；模型只参与建议，不自动放宽硬阻断。</p></header>
+<main>
+  <div class="toolbar">
+    <section class="panel"><div class="label">管理员会话</div><h2>连接运营台</h2><div class="row"><input id="token" type="password" autocomplete="off" placeholder="管理员密钥（仅保留在当前页面）"><button id="connect">连接</button></div><small>仅在本机或可信 HTTPS 环境打开。页面不保存密钥。</small></section>
+    <section class="panel"><div class="label">边界</div><h2>上传默认不外发</h2><div class="summary">未配置的目标仅可检查；解析失败、超限或模型不可用不会放行。请勿用真实敏感文件做演示。</div></section>
+  </div>
+  <p id="notice" class="notice" role="status"></p>
+  <div class="grid" id="stats"></div>
+  <section class="panel"><div class="row"><h2>最近审计</h2><button class="secondary" id="refresh">刷新</button></div><div class="scroll"><table><thead><tr><th>时间 / ID</th><th>身份 / 目标</th><th>文件</th><th>判定 / 原因</th><th>复核</th></tr></thead><tbody id="audits"></tbody></table></div></section>
+  <div class="grid">
+    <section class="panel"><h2>策略配置</h2><form id="policy-form"><input name="keyword" placeholder="敏感关键词，如 内部机密" required minlength="2" maxlength="64"><div class="row"><select name="action"><option value="review">人工复核</option><option value="block">阻断</option></select><select name="scope"><option value="external">仅外部</option><option value="all">全部</option><option value="internal">仅内部</option></select></div><button>添加策略</button></form><div id="policies"></div></section>
+    <section class="panel"><h2>重点人员</h2><div id="users"></div><h2 style="margin-top:28px">短时例外申请</h2><div id="exceptions"></div></section>
+  </div>
+  <section class="panel"><h2>误报与优化建议</h2><p class="muted">反馈只生成候选建议，策略仍须人工审核修改。</p><div id="suggestions" class="summary"></div></section>
+</main>
+<script>
+  const $=id=>document.getElementById(id);let token="";
+  const note=message=>{$("notice").textContent=message};
+  const cell=(row,value)=>{const td=document.createElement("td");td.textContent=String(value??"");row.append(td);return td};
+  const button=(label,fn,cls="secondary")=>{const b=document.createElement("button");b.textContent=label;b.className=cls;b.onclick=fn;return b};
+  async function api(path,options={}){
+    if(!token)throw Error("先输入管理员密钥");
+    const response=await fetch(path,{...options,headers:{Authorization:"Bearer "+token,...(options.body?{"Content-Type":"application/json"}:{})}});
+    const data=await response.json();if(!response.ok)throw Error(typeof data.detail==="string"?data.detail:JSON.stringify(data.detail));return data;
+  }
+  const run=fn=>async()=>{try{note("");await fn()}catch(e){note(e.message)}};
+  async function refresh(){
+    const [audits,report,policies,users,exceptions]=await Promise.all([
+      api("/v1/admin/audits"),api("/v1/admin/report"),api("/v1/admin/policies"),api("/v1/admin/users"),api("/v1/admin/exceptions")]);
+    $("stats").replaceChildren();for(const action of ["allow","review","block"]){
+      const count=report.counts.find(x=>x.action===action)?.count||0;
+      const div=document.createElement("div");div.className="panel";
+      const label=document.createElement("div");label.className="label";label.textContent="近 7 天 · "+action;
+      const value=document.createElement("div");value.className="stat "+action;value.textContent=count;div.append(label,value);$("stats").append(div);
+    }
+    $("audits").replaceChildren();for(const item of audits){
+      const tr=document.createElement("tr");cell(tr,item.created_at+" #"+item.id);cell(tr,item.actor+" → "+item.destination);
+      cell(tr,item.filename+" ("+item.size+" B)");cell(tr,item.action+" · "+JSON.parse(item.reasons).join(", "));
+      const td=cell(tr,"");td.append(button("误报",run(async()=>{await api("/v1/admin/audits/"+item.id+"/feedback",{method:"PUT",body:JSON.stringify({verdict:"false_positive"})});await refresh()})));
+      $("audits").append(tr);
+    }
+    $("policies").replaceChildren();for(const p of policies){
+      const line=document.createElement("p");line.className="summary";line.textContent="#"+p.id+" · "+p.keyword+" · "+p.action+" / "+p.scope+" · "+(p.enabled?"启用":"停用")+" ";
+      line.append(button(p.enabled?"停用":"启用",run(async()=>{await api("/v1/admin/policies/"+p.id,{method:"PUT",body:JSON.stringify({...p,enabled:!p.enabled})});await refresh()})));$("policies").append(line);
+    }
+    $("users").replaceChildren();for(const user of users){
+      const line=document.createElement("p");line.className="summary";line.textContent=user.actor+" · "+user.status+" ";
+      const select=document.createElement("select");for(const status of ["normal","privileged","departing"]){const o=document.createElement("option");o.value=status;o.textContent=status;select.append(o)}select.value=user.status;select.style.width="auto";
+      line.append(select,button("更新",run(async()=>{await api("/v1/admin/users/"+encodeURIComponent(user.actor),{method:"PUT",body:JSON.stringify({status:select.value})});await refresh()})));$("users").append(line);
+    }
+    $("exceptions").replaceChildren();for(const item of exceptions){
+      const line=document.createElement("p");line.className="summary";line.textContent="#"+item.id+" · "+item.actor+" → "+item.destination+" · "+item.status+" · "+item.justification+" ";
+      if(item.status==="pending")line.append(button("批准 1 小时",run(async()=>{await api("/v1/admin/exceptions/"+item.id+"/approve",{method:"POST",body:JSON.stringify({hours:1})});await refresh()})));
+      $("exceptions").append(line);
+    }
+    $("suggestions").textContent=Object.entries(report.false_positive_policy_candidates).map(([k,v])=>k+"："+v+" 条误报反馈").join("；")||"暂无需要复盘的误报策略。";
+  }
+  $("connect").onclick=run(async()=>{token=$("token").value;$("token").value="";await refresh()});
+  $("refresh").onclick=run(refresh);
+  $("policy-form").onsubmit=event=>{event.preventDefault();run(async()=>{
+    const form=event.target;const payload=Object.fromEntries(new FormData(form));
+    await api("/v1/admin/policies",{method:"POST",body:JSON.stringify(payload)});form.reset();await refresh();
+  })()};
+</script>
+</body>
+</html>

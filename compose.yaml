@@ -1,0 +1,17 @@
+services:
+  gateway:
+    build: .
+    env_file: .env
+    environment:
+      DLP_DB_PATH: /data/dlp.db
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - dlp-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+volumes:
+  dlp-data:
