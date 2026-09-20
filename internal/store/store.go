@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -47,6 +48,7 @@ type Audit struct {
 	Signals        []string `json:"signals"`
 	ModelStatus    string   `json:"model_status"`
 	Forwarded      bool     `json:"forwarded"`
+	TransferStatus string   `json:"transfer_status"`
 	UpstreamStatus *int     `json:"upstream_status,omitempty"`
 }
 type Exception struct {
@@ -74,6 +76,9 @@ func Open(path string) (*Store, error) {
 		if err := json.Unmarshal(data, &s.state); err != nil {
 			return nil, err
 		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			return nil, err
+		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
@@ -90,6 +95,30 @@ func (s *Store) normalize() {
 	}
 	if s.state.Feedback == nil {
 		s.state.Feedback = map[int64]Feedback{}
+	}
+	if s.state.Policies == nil {
+		s.state.Policies = []Policy{}
+	}
+	if s.state.Audits == nil {
+		s.state.Audits = []Audit{}
+	}
+	if s.state.Exceptions == nil {
+		s.state.Exceptions = []Exception{}
+	}
+	if s.state.Events == nil {
+		s.state.Events = []map[string]any{}
+	}
+	for i := range s.state.Audits {
+		if s.state.Audits[i].TransferStatus == "" {
+			switch {
+			case s.state.Audits[i].Forwarded:
+				s.state.Audits[i].TransferStatus = "forwarded"
+			case s.state.Audits[i].UpstreamStatus != nil:
+				s.state.Audits[i].TransferStatus = "failed"
+			default:
+				s.state.Audits[i].TransferStatus = "not_requested"
+			}
+		}
 	}
 }
 func (s *Store) persistLocked() error {
@@ -123,7 +152,15 @@ func (s *Store) persistLocked() error {
 	if err = tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(name, s.path)
+	if err := os.Rename(name, s.path); err != nil {
+		return err
+	}
+	directory, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
 }
 func (s *Store) nextIDLocked(kind string) int64 {
 	s.state.NextIDs[kind]++
@@ -147,7 +184,12 @@ func (s *Store) Users(actors map[string]string) []map[string]string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := make([]map[string]string, 0, len(actors))
+	names := make([]string, 0, len(actors))
 	for actor := range actors {
+		names = append(names, actor)
+	}
+	sort.Strings(names)
+	for _, actor := range names {
 		status := s.state.Users[actor]
 		if status == "" {
 			status = "normal"
@@ -159,7 +201,9 @@ func (s *Store) Users(actors map[string]string) []map[string]string {
 func (s *Store) Policies() ([]Policy, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return append([]Policy(nil), s.state.Policies...), nil
+	result := make([]Policy, len(s.state.Policies))
+	copy(result, s.state.Policies)
+	return result, nil
 }
 func (s *Store) AddPolicy(p Policy) (int64, error) {
 	s.mu.Lock()
@@ -197,18 +241,28 @@ func (s *Store) Approved(actor, destination, sha string) bool {
 func (s *Store) InsertAudit(a Audit) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if a.Reasons == nil {
+		a.Reasons = []string{}
+	}
+	if a.Signals == nil {
+		a.Signals = []string{}
+	}
+	if a.TransferStatus == "" {
+		a.TransferStatus = "not_requested"
+	}
 	a.ID = s.nextIDLocked("audit")
 	a.CreatedAt = now()
 	s.state.Audits = append(s.state.Audits, a)
 	return a.ID, s.persistLocked()
 }
-func (s *Store) MarkForwarded(id int64, status int, forwarded bool) error {
+func (s *Store) MarkDelivery(id int64, status *int, forwarded bool, transferStatus string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i := range s.state.Audits {
 		if s.state.Audits[i].ID == id {
 			s.state.Audits[i].Forwarded = forwarded
-			s.state.Audits[i].UpstreamStatus = &status
+			s.state.Audits[i].UpstreamStatus = status
+			s.state.Audits[i].TransferStatus = transferStatus
 			return s.persistLocked()
 		}
 	}
@@ -220,18 +274,41 @@ func (s *Store) Audits(limit int) ([]Audit, error) {
 	if limit < 1 {
 		limit = 1
 	}
-	if limit > 200 {
-		limit = 200
+	if limit > 500 {
+		limit = 500
 	}
 	start := len(s.state.Audits) - limit
 	if start < 0 {
 		start = 0
 	}
-	result := append([]Audit(nil), s.state.Audits[start:]...)
+	result := make([]Audit, len(s.state.Audits)-start)
+	copy(result, s.state.Audits[start:])
 	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
 		result[i], result[j] = result[j], result[i]
 	}
 	return result, nil
+}
+func (s *Store) AuditsSince(since time.Time) ([]Audit, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]Audit, 0)
+	for _, audit := range s.state.Audits {
+		created, err := time.Parse(time.RFC3339, audit.CreatedAt)
+		if err == nil && !created.Before(since) {
+			result = append(result, audit)
+		}
+	}
+	return result, nil
+}
+func (s *Store) AuditByID(id int64) (Audit, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, audit := range s.state.Audits {
+		if audit.ID == id {
+			return audit, nil
+		}
+	}
+	return Audit{}, errors.New("audit not found")
 }
 func (s *Store) AuditForActor(id int64, actor string) (Audit, error) {
 	s.mu.RLock()
@@ -258,7 +335,8 @@ func (s *Store) CreateException(a Audit, actor, justification string) (int64, er
 func (s *Store) Exceptions() ([]Exception, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	result := append([]Exception(nil), s.state.Exceptions...)
+	result := make([]Exception, len(s.state.Exceptions))
+	copy(result, s.state.Exceptions)
 	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
 		result[i], result[j] = result[j], result[i]
 	}
@@ -311,7 +389,8 @@ func (s *Store) Event(event, target string) error {
 func (s *Store) Events() ([]map[string]any, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	result := append([]map[string]any(nil), s.state.Events...)
+	result := make([]map[string]any, len(s.state.Events))
+	copy(result, s.state.Events)
 	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
 		result[i], result[j] = result[j], result[i]
 	}

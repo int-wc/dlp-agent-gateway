@@ -34,8 +34,8 @@ Go Gateway (:18080)
 | 上传网关 | Go 标准库 HTTP 服务；Bearer 身份；8 MiB 文件上限；服务端目标白名单；安全响应头；超时与优雅关闭。 |
 | 内容解析 | Go 直接处理 UTF-8 文本、代码、CSV、JSON；可选 Python Worker 处理文字型 PDF（最多 30 页）、DOCX 和 PNG/JPEG OCR。解析失败、空白、超限和不支持格式均进入 `review`。 |
 | 风险决策 | 私钥、AWS Access Key、身份证号/手机号候选特征；动态字面关键词策略；离职/重点人员状态；可选本地 Ollama。模型只可提高审查强度。 |
-| 运营闭环 | 审计列表、策略和人员状态管理、按人员+目标+SHA-256 限定的临时例外、管理员事件、误报反馈和 1–90 天统计。 |
-| 控制台 | `/console` 提供本地运营台；`/health` 提供健康检查。 |
+| 运营闭环 | 内容判定与传输结果分开留痕；已认证但格式错误或目标无效的上传也记录；支持审计列表、策略/人员状态、临时例外、管理员事件、误报反馈和完整 1–90 天窗口统计。 |
+| 控制台与探针 | `/console` 支持空库展示和合成文件检查；`/health` 是进程存活探针，`/ready` 会在已配置 Analyzer 但不可用时返回 503。 |
 | 受控转发 | 只有调用 `/v1/forward/...`、判定为 `allow` 且目标预先配置时才转发；禁止任意 URL，禁止跟随重定向。 |
 
 ### 快速开始
@@ -75,7 +75,7 @@ python3 -m venv .venv
 
 图片 OCR 还需安装 `pip install -e ".[ocr]"` 和系统的 `tesseract`。缺少 OCR 依赖时图片进入 `review`。
 
-4. 打开 [http://127.0.0.1:18080/console](http://127.0.0.1:18080/console)，输入管理员密钥。用只含虚构内容的文件测试：
+4. 打开 [http://127.0.0.1:18080/console](http://127.0.0.1:18080/console)，可直接输入客户端密钥并选择合成文件完成检查；输入管理员密钥后可查看刚生成的审计。也可以使用命令行：
 
 ```bash
 curl -sS -H "Authorization: Bearer YOUR_CLIENT_KEY" \
@@ -98,7 +98,7 @@ Compose 启动 Go Gateway 和 Python Analyzer 两个非 root、只读根文件�
 ### API 工作流
 
 1. 业务集成以对应身份密钥调用 `POST /v1/check/{destination}` 或 `POST /v1/forward/{destination}`，multipart 字段名为 `file`。
-2. 返回 `allow`、`review` 或 `block`，以及原因代码、SHA-256 和审计 ID。`review` 与 `block` 永不转发。
+2. 返回 `allow`、`review` 或 `block`，以及原因代码、SHA-256、审计 ID 和独立的 `transfer_status`。`review` 与 `block` 永不转发；显式转发会区分 `pending`、`not_configured`、`failed` 和 `forwarded`。
 3. 管理员通过 `/v1/admin/...` 管理策略、人员状态、例外、反馈、审计和报告。
 4. 对可配置策略命中的审计，客户端可向 `POST /v1/exceptions` 提交 `audit_id` 和理由；批准只对同一身份、目标和完全相同的文件字节有效，且不能绕过秘密、人员、个人信息或模型故障规则。
 5. 误报反馈只生成策略优化候选，不自动修改策略。
@@ -112,7 +112,7 @@ Compose 启动 Go Gateway 和 Python Analyzer 两个非 root、只读根文件�
 ### 测试
 
 ```bash
-go test ./...
+go test -race ./...
 go build ./cmd/dlp-gateway
 .venv/bin/python -m pytest -q
 ```
@@ -124,7 +124,8 @@ GitHub Actions 同时运行 Go 测试、Go 构建和 Python 回归测试。测�
 - 这是主动接入的策略执行点，不是透明流量拦截器；绕过网关的上传也会绕过检查。
 - 当前 Bearer 密钥与本地控制台只适合演示。生产环境需要 mTLS/SSO 或签名工作负载身份、RBAC、职责分离、密钥轮换、TLS 和集中式密钥管理。
 - Python Worker 与网关分进程，但当前容器配置仍不是强沙箱。生产环境需要解析任务队列、CPU/内存/时间配额、恶意软件扫描、内容类型核验和反向代理级请求限制。
-- 当前原子 JSON 存储提供 `0600` 权限、临时文件写入、`fsync` 和原子重命名，只适合单实例演示。它没有事务数据库的并发、查询、备份、加密和高可用能力；生产环境应替换为 PostgreSQL 或其他受管数据库，并配置审计保留与删除策略。
+- 当前原子 JSON 存储提供 `0600` 权限、临时文件写入、文件及目录 `fsync` 和原子重命名，只适合单实例演示。它可留痕但不可防篡改，也没有事务数据库的并发、查询、备份、加密和高可用能力；生产环境应替换为 PostgreSQL 或其他受管数据库，并配置审计保留、导出与删除策略。
+- 应用会记录通过身份认证后的上传判定与早期拒绝；无法识别身份的鉴权失败不写入应用 JSON，以免匿名请求造成同步磁盘写入型拒绝服务。生产环境应由限流的入口代理或 SIEM 记录这类访问安全日志。
 - PDF 扫描页 OCR、XLSX/PPTX、嵌套压缩包、加密文档和复杂嵌入内容尚未覆盖，均应进入复核。格式提取不等于内容全覆盖。
 - 正则会误报，模型会误判或受文档中指令干扰。任何策略优化都应人工批准并经过回归测试。
 - 不要在公开 issue、日志、截图、提交或演示实例中使用真实企业文件、个人数据、密钥或客户数据。
@@ -172,8 +173,8 @@ The primary path is split by responsibility: `cmd/dlp-gateway` owns process life
 | Upload gateway | Go standard-library HTTP server; Bearer identity; 8 MiB file limit; server-side destination allowlist; security headers; timeouts and graceful shutdown. |
 | Extraction | Go handles UTF-8 text, code, CSV, and JSON directly. The optional Python worker handles text-based PDF (up to 30 pages), DOCX, and PNG/JPEG OCR. Parse failures, blank input, over-limit input, and unsupported formats require `review`. |
 | Decision | Private-key, AWS key, ID/phone candidate signals; dynamic literal policies; departing/privileged personnel state; optional local Ollama. Model output may escalate only. |
-| Operations | Audit list, policy and personnel controls, expiring actor+destination+SHA-256 exceptions, admin events, false-positive feedback, and 1–90-day reports. |
-| Console | Local operator console at `/console` and liveness at `/health`. |
+| Operations | Separate content-decision and transfer outcomes; authenticated malformed/unknown-target attempts are audited; audit list, policy/personnel controls, scoped exceptions, admin events, feedback, and full-window 1–90-day reports. |
+| Console and probes | `/console` handles an empty store and can inspect a synthetic file; `/health` is liveness, while `/ready` returns 503 when a configured Analyzer is unavailable. |
 | Controlled forwarding | Forwarding requires an explicit `/v1/forward/...` call, an `allow` decision, and a preconfigured receiver. Arbitrary URLs and redirects are rejected. |
 
 ### Quick start
@@ -213,7 +214,7 @@ python3 -m venv .venv
 
 Image OCR additionally requires `pip install -e ".[ocr]"` and the system `tesseract` binary. Images require `review` when OCR is unavailable.
 
-4. Open [http://127.0.0.1:18080/console](http://127.0.0.1:18080/console) and enter the admin key. Try a file containing invented text only:
+4. Open [http://127.0.0.1:18080/console](http://127.0.0.1:18080/console). You can enter a client key and inspect a synthetic file directly, then enter the admin key to view the resulting audit. Or use the command line:
 
 ```bash
 curl -sS -H "Authorization: Bearer YOUR_CLIENT_KEY" \
@@ -236,7 +237,7 @@ Compose starts the Go Gateway and Python Analyzer as non-root services with read
 ### API workflow
 
 1. A business integration authenticates with its actor key and calls `POST /v1/check/{destination}` or `POST /v1/forward/{destination}` using multipart field `file`.
-2. The result is `allow`, `review`, or `block` with reason codes, SHA-256, and an audit ID. `review` and `block` never forward.
+2. The result is `allow`, `review`, or `block` with reason codes, SHA-256, an audit ID, and a separate `transfer_status`. `review` and `block` never forward. Explicit forwarding distinguishes `pending`, `not_configured`, `failed`, and `forwarded`.
 3. Administrators use `/v1/admin/...` to manage policies, personnel state, exceptions, feedback, audits, and reports.
 4. For a configurable policy hit, a client may submit `audit_id` and a justification to `POST /v1/exceptions`. Approval is restricted to the same actor, destination, and exact file bytes; it cannot bypass secret, personnel, personal-data, or model-outage guards.
 5. False-positive feedback creates policy-tuning candidates but never mutates policy automatically.
@@ -250,7 +251,7 @@ Run Ollama locally and set `DLP_OLLAMA_MODEL=qwen2.5:7b`. The Go gateway sends a
 ### Tests
 
 ```bash
-go test ./...
+go test -race ./...
 go build ./cmd/dlp-gateway
 .venv/bin/python -m pytest -q
 ```
@@ -262,7 +263,8 @@ GitHub Actions runs Go tests, a Go build, and Python regression tests. All fixtu
 - This is an explicitly integrated policy enforcement point, not a transparent network interceptor. Uploads that bypass it also bypass inspection.
 - Bearer keys and the local console are demo controls. Production requires mTLS/SSO or signed workload identity, RBAC, separation of duties, key rotation, TLS, and centralized secret management.
 - The Python worker is a separate process, but the current containers are not a strong parser sandbox. Production needs a queued parser boundary, CPU/memory/time quotas, malware scanning, content-type verification, and reverse-proxy request limits.
-- The atomic JSON store uses `0600` permissions, a temporary file, `fsync`, and atomic rename. It is a single-instance demo store without a transactional database's concurrency, query, backup, encryption, or HA properties. Replace it with PostgreSQL or another managed database and define audit retention/deletion.
+- The atomic JSON store uses `0600` permissions, a temporary file, file/directory `fsync`, and atomic rename. It records activity but is not tamper-proof, and lacks a transactional database's concurrency, query, backup, encryption, and HA properties. Replace it with PostgreSQL or another managed database and define audit retention, export, and deletion.
+- The application audits upload decisions and early rejections after actor authentication. Unattributable authentication failures are not synchronously persisted to JSON because anonymous traffic could otherwise cause disk-write denial of service. Use a rate-limited ingress proxy or SIEM for those access-security logs in production.
 - OCR for scanned PDF pages, XLSX/PPTX, nested archives, encrypted documents, and complex embedded content are not covered. Such inputs should require review. Format extraction is not proof of full content coverage.
 - Regex signals can produce false positives; models can misclassify or follow document-borne instructions. Policy changes require human approval and regression tests.
 - Never place real corporate documents, personal data, secrets, or customer-derived material in public issues, logs, screenshots, commits, or demo instances.

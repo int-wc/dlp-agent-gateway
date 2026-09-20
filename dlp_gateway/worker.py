@@ -8,7 +8,7 @@ from .parsing import MAX_BYTES, extract, signals
 
 
 def create_worker_app() -> FastAPI:
-    app = FastAPI(title="DLP Analyzer Worker", version="0.1.0")
+    app = FastAPI(title="DLP Analyzer Worker", version="0.2.0")
 
     @app.get("/health")
     def health():

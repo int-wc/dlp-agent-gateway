@@ -44,6 +44,7 @@ func (s *Server) Handler() http.Handler {
 }
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /health", s.health)
+	s.mux.HandleFunc("GET /ready", s.ready)
 	s.mux.HandleFunc("GET /console", s.console)
 	s.mux.HandleFunc("GET /v1/destinations", s.destinations)
 	s.mux.HandleFunc("POST /v1/check/{destination}", s.check)
@@ -63,7 +64,20 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/admin/events", s.events)
 }
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, map[string]any{"status": "ok", "model_enabled": s.cfg.OllamaModel != ""})
+	writeJSON(w, 200, map[string]any{"status": "ok", "version": "0.2.0", "analyzer_enabled": s.cfg.AnalyzerURL != "", "model_enabled": s.cfg.OllamaModel != ""})
+}
+func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.AnalyzerURL == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "analyzer": "disabled"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if !s.engine.AnalyzerReady(ctx) {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "degraded", "analyzer": "unavailable"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "analyzer": "ready"})
 }
 func (s *Server) console(w http.ResponseWriter, r *http.Request) {
 	data, err := os.ReadFile(s.cfg.ConsolePath)
@@ -95,7 +109,7 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request, doForward bool) 
 	destinationName := r.PathValue("destination")
 	destination, exists := s.cfg.Destinations[destinationName]
 	if !exists {
-		writeError(w, 404, "unknown_destination")
+		s.writeRejectedUpload(w, http.StatusNotFound, actor, safeAuditLabel(destinationName, 80), "unavailable", 0, "unknown_destination")
 		return
 	}
 	// Allow bounded multipart framing overhead while enforcing the exact file
@@ -107,22 +121,22 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request, doForward bool) 
 		}
 		var maxBytesError *http.MaxBytesError
 		if errors.As(err, &maxBytesError) {
-			writeError(w, 413, "file_too_large")
+			s.writeRejectedUpload(w, http.StatusRequestEntityTooLarge, actor, destinationName, "unavailable", 0, "file_too_large")
 		} else {
-			writeError(w, 400, "invalid_multipart")
+			s.writeRejectedUpload(w, http.StatusBadRequest, actor, destinationName, "unavailable", 0, "invalid_multipart")
 		}
 		return
 	}
 	defer r.MultipartForm.RemoveAll()
 	file, header, err := r.FormFile("file")
 	if err != nil {
-		writeError(w, 400, "file_required")
+		s.writeRejectedUpload(w, http.StatusBadRequest, actor, destinationName, "unavailable", 0, "file_required")
 		return
 	}
 	defer file.Close()
 	data, err := io.ReadAll(io.LimitReader(file, config.MaxUploadBytes+1))
 	if err != nil {
-		writeError(w, 400, "file_read_failed")
+		s.writeRejectedUpload(w, http.StatusBadRequest, actor, destinationName, safeFilename(header.Filename), 0, "file_read_failed")
 		return
 	}
 	filename := safeFilename(header.Filename)
@@ -139,39 +153,75 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request, doForward bool) 
 			reason = "file_too_large"
 			status = 413
 		}
-		id, _ := s.store.InsertAudit(store.Audit{Actor: actor, Destination: destinationName, Filename: filename, SHA256: digest, Size: size, Action: "block", Reasons: []string{reason}, ModelStatus: "skipped"})
+		id, err := s.store.InsertAudit(store.Audit{Actor: actor, Destination: destinationName, Filename: filename, SHA256: digest, Size: size, Action: "block", Reasons: []string{reason}, ModelStatus: "skipped", TransferStatus: "not_attempted"})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "audit_failed")
+			return
+		}
 		writeJSON(w, status, map[string]any{"audit_id": id, "reason": reason})
 		return
 	}
 	policies, _ := s.store.Policies()
 	decision := s.engine.Inspect(r.Context(), data, filename, destination, s.store.UserStatus(actor), policies, s.store.Approved(actor, destinationName, digest))
-	audit := store.Audit{Actor: actor, Destination: destinationName, Filename: filename, SHA256: digest, Size: size, Action: decision.Action, Reasons: decision.Reasons, Signals: decision.Signals, ModelStatus: decision.ModelStatus}
+	transferStatus := "not_requested"
+	if doForward {
+		transferStatus = "not_attempted"
+		if decision.Action == "allow" {
+			transferStatus = "pending"
+		}
+	}
+	audit := store.Audit{Actor: actor, Destination: destinationName, Filename: filename, SHA256: digest, Size: size, Action: decision.Action, Reasons: decision.Reasons, Signals: decision.Signals, ModelStatus: decision.ModelStatus, TransferStatus: transferStatus}
 	id, err := s.store.InsertAudit(audit)
 	if err != nil {
 		writeError(w, 500, "audit_failed")
 		return
 	}
-	result := map[string]any{"audit_id": id, "destination": destinationName, "sha256": digest, "action": decision.Action, "reasons": decision.Reasons, "signals": decision.Signals, "model_status": decision.ModelStatus, "forwarded": false}
+	result := map[string]any{"audit_id": id, "destination": destinationName, "sha256": digest, "action": decision.Action, "reasons": decision.Reasons, "signals": decision.Signals, "model_status": decision.ModelStatus, "forwarded": false, "transfer_status": transferStatus}
 	if !doForward || decision.Action != "allow" {
 		writeJSON(w, 200, result)
 		return
 	}
 	if destination.URL == "" {
+		if err := s.store.MarkDelivery(id, nil, false, "not_configured"); err != nil {
+			writeErrorWithAudit(w, http.StatusInternalServerError, id, "audit_update_failed")
+			return
+		}
 		writeErrorWithAudit(w, 503, id, "forwarding_not_configured")
 		return
 	}
 	status, reason := s.sendUpstream(r, destination.URL, filename, data, id)
 	if reason != "" {
+		var upstreamStatus *int
 		if status > 0 {
-			_ = s.store.MarkForwarded(id, status, false)
+			upstreamStatus = &status
+		}
+		if err := s.store.MarkDelivery(id, upstreamStatus, false, "failed"); err != nil {
+			writeErrorWithAudit(w, http.StatusInternalServerError, id, "audit_update_failed")
+			return
 		}
 		writeErrorWithAudit(w, 502, id, reason)
 		return
 	}
-	_ = s.store.MarkForwarded(id, status, true)
+	if err := s.store.MarkDelivery(id, &status, true, "forwarded"); err != nil {
+		writeErrorWithAudit(w, http.StatusInternalServerError, id, "forwarded_audit_update_failed")
+		return
+	}
 	result["forwarded"] = true
+	result["transfer_status"] = "forwarded"
 	result["upstream_status"] = status
 	writeJSON(w, 200, result)
+}
+
+func (s *Server) writeRejectedUpload(w http.ResponseWriter, status int, actor, destination, filename string, size int64, reason string) {
+	id, err := s.store.InsertAudit(store.Audit{
+		Actor: actor, Destination: destination, Filename: filename, Size: size,
+		Action: "block", Reasons: []string{reason}, ModelStatus: "skipped", TransferStatus: "not_attempted",
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "audit_failed")
+		return
+	}
+	writeJSON(w, status, map[string]any{"detail": reason, "audit_id": id})
 }
 func (s *Server) sendUpstream(r *http.Request, url, filename string, data []byte, auditID int64) (int, string) {
 	var body bytes.Buffer
@@ -238,13 +288,19 @@ func (s *Server) requestException(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 409, "exception_already_exists")
 		return
 	}
+	_ = s.store.Event("exception_requested", strconv.FormatInt(id, 10))
 	writeJSON(w, 201, map[string]any{"id": id, "status": "pending"})
 }
 func (s *Server) adminAudits(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOK(w, r) {
 		return
 	}
-	items, err := s.store.Audits(queryInt(r, "limit", 50))
+	limit := queryInt(r, "limit", 50)
+	if limit < 1 || limit > 500 {
+		writeError(w, http.StatusBadRequest, "limit_must_be_1_to_500")
+		return
+	}
+	items, err := s.store.Audits(limit)
 	if err != nil {
 		writeError(w, 500, "query_failed")
 		return
@@ -407,14 +463,7 @@ func (s *Server) feedback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid_feedback")
 		return
 	}
-	audits, _ := s.store.Audits(200)
-	found := false
-	for _, a := range audits {
-		if a.ID == id {
-			found = true
-		}
-	}
-	if !found {
+	if _, err := s.store.AuditByID(id); err != nil {
 		writeError(w, 404, "audit_not_found")
 		return
 	}
@@ -434,16 +483,18 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "days_must_be_1_to_90")
 		return
 	}
-	audits, _ := s.store.Audits(200)
 	since := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour)
-	counts := map[string]int{}
+	audits, err := s.store.AuditsSince(since)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "query_failed")
+		return
+	}
+	counts := map[string]int{"allow": 0, "review": 0, "block": 0}
+	transferCounts := map[string]int{"not_requested": 0, "not_attempted": 0, "pending": 0, "not_configured": 0, "failed": 0, "forwarded": 0}
 	top := map[string]int{}
 	for _, a := range audits {
-		t, _ := time.Parse(time.RFC3339, a.CreatedAt)
-		if t.Before(since) {
-			continue
-		}
 		counts[a.Action]++
+		transferCounts[a.TransferStatus]++
 		for _, reason := range a.Reasons {
 			top[reason]++
 		}
@@ -466,7 +517,7 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	writeJSON(w, 200, map[string]any{"days": days, "counts": counts, "top_reasons": top, "false_positive_policy_candidates": suggestions, "note": "Feedback generates suggestions only; no automatic policy changes."})
+	writeJSON(w, 200, map[string]any{"days": days, "total": len(audits), "counts": counts, "transfer_counts": transferCounts, "top_reasons": top, "false_positive_policy_candidates": suggestions, "note": "Feedback generates suggestions only; no automatic policy changes."})
 }
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOK(w, r) {
@@ -569,11 +620,29 @@ func safeFilename(value string) string {
 	}
 	return result
 }
+func safeAuditLabel(value string, maxRunes int) string {
+	value = strings.Map(func(r rune) rune {
+		if r < 32 || r == 127 {
+			return '_'
+		}
+		return r
+	}, value)
+	if value == "" {
+		return "unavailable"
+	}
+	runes := []rune(value)
+	if len(runes) > maxRunes {
+		runes = runes[:maxRunes]
+	}
+	return string(runes)
+}
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		w.Header().Set("Cache-Control", "no-store")
 		next.ServeHTTP(w, r)
 	})

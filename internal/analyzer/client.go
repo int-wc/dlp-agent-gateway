@@ -33,6 +33,23 @@ func New(baseURL string) *Client {
 	}}
 }
 
+func (c *Client) Healthy(ctx context.Context) bool {
+	if c.BaseURL == "" {
+		return true
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/health", nil)
+	if err != nil {
+		return false
+	}
+	response, err := c.HTTP.Do(req)
+	if err != nil {
+		return false
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1024))
+	return response.StatusCode >= 200 && response.StatusCode < 300
+}
+
 func (c *Client) Analyze(ctx context.Context, filename string, data []byte) Result {
 	if isText(filename, data) {
 		text := string(data)

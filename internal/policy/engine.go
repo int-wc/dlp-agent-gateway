@@ -34,6 +34,10 @@ func New(cfg config.Config) *Engine {
 	}}
 }
 
+func (e *Engine) AnalyzerReady(ctx context.Context) bool {
+	return e.Analyzer.Healthy(ctx)
+}
+
 func (e *Engine) Inspect(ctx context.Context, data []byte, filename string, destination config.Destination, actorStatus string, policies []store.Policy, approved bool) Decision {
 	analysis := e.Analyzer.Analyze(ctx, filename, data)
 	hard, soft := []string{}, []string{}
