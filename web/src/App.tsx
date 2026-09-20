@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
-import { Alert, Avatar, Badge, Button, ConfigProvider, Dropdown, Input, Layout, Menu, Space, Spin, Typography, message, theme } from 'antd'
+import { Alert, Avatar, Badge, Button, ConfigProvider, Dropdown, Layout, Menu, Spin, Typography, theme } from 'antd'
 import {
   ApiOutlined, AuditOutlined, BarChartOutlined, BellOutlined, DashboardOutlined, ExperimentOutlined,
   FileProtectOutlined, LogoutOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SafetyCertificateOutlined,
@@ -8,6 +8,7 @@ import {
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getHealth, getSession, setAdminToken, api } from './lib/api'
 import type { Session } from './lib/types'
+import { Login } from './pages/Login'
 
 const Overview = lazy(() => import('./pages/Overview').then(module => ({ default: module.Overview })))
 const Incidents = lazy(() => import('./pages/Incidents').then(module => ({ default: module.Incidents })))
@@ -35,33 +36,6 @@ const navigation = [
   { key: 'settings', icon: <SettingOutlined />, label: '系统设置' },
 ]
 
-function Login({ session, onAuthenticated }: { session: Session; onAuthenticated: () => Promise<void> }) {
-  const [token, setToken] = useState('')
-  const [loading, setLoading] = useState(false)
-  const supportsOIDC = session.mode === 'oidc' || session.mode === 'oidc_or_static'
-  const supportsStatic = session.mode === 'static' || session.mode === 'oidc_or_static'
-  const submit = async () => {
-    setLoading(true); setAdminToken(token)
-    try { await onAuthenticated() } finally { setLoading(false) }
-  }
-  return <div className="login-shell">
-    <div className="login-visual">
-      <div className="brand-mark large"><SafetyCertificateOutlined /></div>
-      <div className="login-copy"><span>Sentinel Gate</span><h1>让每一次业务上传<br />都有可解释的安全决策。</h1><p>策略执行、身份风险、人工复核和审计证据集中在一个运营工作台。</p></div>
-      <div className="visual-grid" />
-    </div>
-    <div className="login-panel">
-      <div className="login-card">
-        <div className="eyebrow">DLP operations console</div><h2>进入运营台</h2><p>使用企业身份或本地演示管理员密钥。</p>
-        {supportsOIDC && <Button type="primary" size="large" block icon={<UserOutlined />} href="/auth/login">使用企业账号登录</Button>}
-        {supportsOIDC && supportsStatic && <div className="login-divider"><span>或使用本地演示身份</span></div>}
-        {supportsStatic && <Space.Compact block size="large"><Input.Password value={token} onChange={event => setToken(event.target.value)} onPressEnter={submit} placeholder="管理员密钥" /><Button type="primary" loading={loading} onClick={submit} disabled={!token}>连接</Button></Space.Compact>}
-        <Alert className="login-alert" type="info" showIcon message="参考实现" description="请只使用合成数据。生产接入前仍需完成组织级部署与安全评审。" />
-      </div>
-    </div>
-  </div>
-}
-
 export default function App() {
   const [page, setPage] = useState(() => location.hash.slice(1) || 'dashboard')
   const [collapsed, setCollapsed] = useState(false)
@@ -75,10 +49,12 @@ export default function App() {
     return () => window.removeEventListener('hashchange', listener)
   }, [])
 
-  const authenticate = async () => {
+  const authenticate = async (_account: string, password: string) => {
+    setAdminToken(password)
     const result = await queryClient.fetchQuery({ queryKey: ['session', Date.now()], queryFn: getSession })
-    if (!result.authenticated) { setAdminToken(''); message.error('管理员身份验证失败'); return }
+    if (!result.authenticated) { setAdminToken(''); return false }
     queryClient.setQueryData(['session'], result)
+    return true
   }
   const logout = async () => {
     try { await api('/auth/logout', { method: 'POST' }) } catch { /* local token mode */ }
@@ -97,7 +73,7 @@ export default function App() {
 
   if (sessionQuery.isLoading) return <div className="boot"><Spin size="large" /><span>正在建立安全会话…</span></div>
   if (sessionQuery.isError) return <div className="boot"><Alert type="error" showIcon message="无法连接网关" description={(sessionQuery.error as Error).message} /></div>
-  if (!session?.authenticated) return <Login session={session ?? { authenticated: false, mode: 'static' }} onAuthenticated={authenticate} />
+  if (!session?.authenticated) return <Login session={session ?? { authenticated: false, mode: 'static' }} onStaticLogin={authenticate} />
 
   const displayName = session.identity?.name || session.identity?.email || session.identity?.subject || '管理员'
   return <Layout className="app-shell">

@@ -77,7 +77,7 @@ python3 -m venv .venv
 
 图片 OCR 还需安装 `pip install -e ".[ocr]"` 和系统的 `tesseract`。缺少 OCR 依赖时图片进入 `review`。
 
-4. 打开 [http://127.0.0.1:18080/console/](http://127.0.0.1:18080/console/)，使用管理员密钥进入运营台，再到“集成与测试”使用客户端身份验证合成文件。也可以使用命令行：
+4. 打开 [http://127.0.0.1:18080/console/](http://127.0.0.1:18080/console/)，通过标准账号登录页面进入运营台，再到“集成与测试”使用客户端身份验证合成文件。当前未配置 OIDC 的本地演示环境仅将密码字段适配到静态管理员凭据；页面不会保存密码，账号只用于为后续真实身份接口预留交互。也可以使用命令行：
 
 ```bash
 curl -sS -H "Authorization: Bearer YOUR_CLIENT_KEY" \
@@ -228,7 +228,7 @@ python3 -m venv .venv
 
 Image OCR additionally requires `pip install -e ".[ocr]"` and the system `tesseract` binary. Images require `review` when OCR is unavailable.
 
-4. Open [http://127.0.0.1:18080/console/](http://127.0.0.1:18080/console/). Enter the admin key, then use Integration & Test Lab with a client identity and a synthetic file. Or use the command line:
+4. Open [http://127.0.0.1:18080/console/](http://127.0.0.1:18080/console/) and enter through the standard account sign-in page, then use Integration & Test Lab with a client identity and a synthetic file. In a local demo without OIDC, only the password field is adapted to the static administrator credential; the page never stores the password, and the account field reserves the interaction contract for a future identity provider. Or use the command line:
 
 ```bash
 curl -sS -H "Authorization: Bearer YOUR_CLIENT_KEY" \
