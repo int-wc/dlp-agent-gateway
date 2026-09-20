@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -18,6 +19,12 @@ import (
 	"github.com/int-wc/dlp-agent-gateway/internal/store"
 )
 
+type unavailablePolicyRepository struct{ store.Repository }
+
+func (unavailablePolicyRepository) Policies() ([]store.Policy, error) {
+	return nil, errors.New("synthetic database outage")
+}
+
 const clientKey = "client-go-smoke-key-20260918-abcdefghijklmnopqrstuvwxyz"
 const adminKey = "admin-go-smoke-key-20260918-abcdefghijklmnopqrstuvwxyz"
 
@@ -28,8 +35,12 @@ func newTestServer(t *testing.T) *httptest.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.Config{AdminKey: adminKey, ClientKeys: map[string]string{"demo-user": clientKey}, Destinations: map[string]config.Destination{"external": {Kind: "external"}, "internal": {Kind: "internal"}}, DBPath: path, ConsolePath: filepath.Join("..", "..", "dlp_gateway", "console.html"), ListenAddress: "127.0.0.1:0"}
-	srv := httptest.NewServer(New(cfg, db, policy.New(cfg)).Handler())
+	cfg := config.Config{AdminKey: adminKey, ClientKeys: map[string]string{"demo-user": clientKey}, Destinations: map[string]config.Destination{"external": {Kind: "external"}, "internal": {Kind: "internal"}}, DBPath: path, ListenAddress: "127.0.0.1:0"}
+	handler, err := New(cfg, db, policy.New(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(handler.Handler())
 	t.Cleanup(func() { srv.Close(); db.Close() })
 	return srv
 }
@@ -111,7 +122,7 @@ func TestEmptyAdminCollectionsAndConsoleAreUsable(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	html, _ := io.ReadAll(resp.Body)
-	for _, expected := range []string{"暂无审计记录", "check-form", "transfer_status"} {
+	for _, expected := range []string{"Sentinel Gate", "DLP 运营台", "root"} {
 		if !bytes.Contains(html, []byte(expected)) {
 			t.Fatalf("console missing %q", expected)
 		}
@@ -125,7 +136,7 @@ func TestGoGatewayHealthAndFailClosedDecisions(t *testing.T) {
 		t.Fatal(err)
 	}
 	health := bodyJSON(t, resp)
-	if health["status"] != "ok" || health["version"] != "0.2.0" {
+	if health["status"] != "ok" || health["version"] != "0.3.0" {
 		t.Fatalf("health=%v", health)
 	}
 	resp, err = http.Get(srv.URL + "/ready")
@@ -155,6 +166,31 @@ func TestGoGatewayHealthAndFailClosedDecisions(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestPolicyStateOutageFailsUploadClosed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.json")
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{AdminKey: adminKey, ClientKeys: map[string]string{"demo-user": clientKey}, Destinations: map[string]config.Destination{"external": {Kind: "external"}}, DBPath: path}
+	handler, err := New(cfg, unavailablePolicyRepository{Repository: db}, policy.New(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(handler.Handler())
+	defer srv.Close()
+	defer db.Close()
+
+	response := upload(t, srv.URL, "/v1/forward/external", "safe.txt", []byte("synthetic safe content"), clientKey)
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d", response.StatusCode)
+	}
+	result := bodyJSON(t, response)
+	if result["detail"] != "policy_state_unavailable" || result["audit_id"] == nil {
+		t.Fatalf("response=%v", result)
+	}
+}
+
 func TestSecurityHeaders(t *testing.T) {
 	srv := newTestServer(t)
 	resp, err := http.Get(srv.URL + "/console")
@@ -180,8 +216,12 @@ func TestReadinessFailsWhenConfiguredAnalyzerIsUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.Config{AdminKey: adminKey, ClientKeys: map[string]string{"demo-user": clientKey}, Destinations: map[string]config.Destination{"external": {Kind: "external"}}, DBPath: path, AnalyzerURL: "http://127.0.0.1:1", ConsolePath: filepath.Join("..", "..", "dlp_gateway", "console.html")}
-	srv := httptest.NewServer(New(cfg, db, policy.New(cfg)).Handler())
+	cfg := config.Config{AdminKey: adminKey, ClientKeys: map[string]string{"demo-user": clientKey}, Destinations: map[string]config.Destination{"external": {Kind: "external"}}, DBPath: path, AnalyzerURL: "http://127.0.0.1:1"}
+	handler, newErr := New(cfg, db, policy.New(cfg))
+	if newErr != nil {
+		t.Fatal(newErr)
+	}
+	srv := httptest.NewServer(handler.Handler())
 	defer srv.Close()
 	defer db.Close()
 
@@ -277,8 +317,12 @@ func TestGoGatewayForwardsOnlyAllowedBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.Config{AdminKey: adminKey, ClientKeys: map[string]string{"demo-user": clientKey}, Destinations: map[string]config.Destination{"internal": {Kind: "internal", URL: receiver.URL}}, DBPath: path, ConsolePath: filepath.Join("..", "..", "dlp_gateway", "console.html")}
-	gateway := httptest.NewServer(New(cfg, db, policy.New(cfg)).Handler())
+	cfg := config.Config{AdminKey: adminKey, ClientKeys: map[string]string{"demo-user": clientKey}, Destinations: map[string]config.Destination{"internal": {Kind: "internal", URL: receiver.URL}}, DBPath: path}
+	handler, newErr := New(cfg, db, policy.New(cfg))
+	if newErr != nil {
+		t.Fatal(newErr)
+	}
+	gateway := httptest.NewServer(handler.Handler())
 	defer gateway.Close()
 	defer db.Close()
 
@@ -302,8 +346,12 @@ func TestForwardingOutcomeIsAudited(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.Config{AdminKey: adminKey, ClientKeys: map[string]string{"demo-user": clientKey}, Destinations: map[string]config.Destination{"configured": {Kind: "internal", URL: receiver.URL}, "check-only": {Kind: "internal"}}, DBPath: path, ConsolePath: filepath.Join("..", "..", "dlp_gateway", "console.html")}
-	srv := httptest.NewServer(New(cfg, db, policy.New(cfg)).Handler())
+	cfg := config.Config{AdminKey: adminKey, ClientKeys: map[string]string{"demo-user": clientKey}, Destinations: map[string]config.Destination{"configured": {Kind: "internal", URL: receiver.URL}, "check-only": {Kind: "internal"}}, DBPath: path}
+	handler, newErr := New(cfg, db, policy.New(cfg))
+	if newErr != nil {
+		t.Fatal(newErr)
+	}
+	srv := httptest.NewServer(handler.Handler())
 	defer srv.Close()
 	defer db.Close()
 
@@ -396,8 +444,12 @@ func TestReportAndFeedbackAreNotLimitedToRecent200(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	cfg := config.Config{AdminKey: adminKey, ClientKeys: map[string]string{"demo-user": clientKey}, Destinations: map[string]config.Destination{"external": {Kind: "external"}}, DBPath: path, ConsolePath: filepath.Join("..", "..", "dlp_gateway", "console.html")}
-	srv := httptest.NewServer(New(cfg, db, policy.New(cfg)).Handler())
+	cfg := config.Config{AdminKey: adminKey, ClientKeys: map[string]string{"demo-user": clientKey}, Destinations: map[string]config.Destination{"external": {Kind: "external"}}, DBPath: path}
+	handler, newErr := New(cfg, db, policy.New(cfg))
+	if newErr != nil {
+		t.Fatal(newErr)
+	}
+	srv := httptest.NewServer(handler.Handler())
 	defer srv.Close()
 	defer db.Close()
 

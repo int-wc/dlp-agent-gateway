@@ -1,0 +1,13 @@
+.git
+.github
+.env
+.venv
+.pytest_cache
+**/__pycache__
+**/*.pyc
+**/*.egg-info
+web/node_modules
+web/*.tsbuildinfo
+var
+dlp-gateway
+.DS_Store

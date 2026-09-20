@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dlp-agent-gateway"
-version = "0.2.0"
+version = "0.3.0"
 description = "A privacy-first, fail-closed DLP upload gateway reference implementation"
 requires-python = ">=3.11"
 dependencies = [
@@ -21,9 +21,6 @@ ocr = ["pillow>=11,<13", "pytesseract>=0.3.13,<1"]
 
 [tool.setuptools.packages.find]
 include = ["dlp_gateway*"]
-
-[tool.setuptools.package-data]
-dlp_gateway = ["console.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

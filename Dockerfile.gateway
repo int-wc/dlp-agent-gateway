@@ -1,18 +1,25 @@
+FROM node:22-alpine AS web-build
+WORKDIR /src/web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web ./
+RUN npm run build
+
 FROM golang:1.23-alpine AS build
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod go.sum ./
+RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
+COPY --from=web-build /src/internal/webui/dist ./internal/webui/dist
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/dlp-gateway ./cmd/dlp-gateway
 
 FROM alpine:3.21
 WORKDIR /app
 RUN addgroup -S gateway && adduser -S -G gateway gateway && mkdir -p /data && chown gateway:gateway /data
 COPY --from=build /out/dlp-gateway /app/dlp-gateway
-COPY dlp_gateway/console.html /app/dlp_gateway/console.html
 USER gateway
 ENV DLP_LISTEN_ADDRESS=0.0.0.0:18080
-ENV DLP_DB_PATH=/data/audit.json
 ENV DLP_ANALYZER_URL=http://analyzer:19090
 EXPOSE 18080
 ENTRYPOINT ["/app/dlp-gateway"]

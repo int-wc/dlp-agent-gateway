@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -9,32 +8,48 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"mime/multipart"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/int-wc/dlp-agent-gateway/internal/access"
 	"github.com/int-wc/dlp-agent-gateway/internal/config"
+	"github.com/int-wc/dlp-agent-gateway/internal/connector"
 	"github.com/int-wc/dlp-agent-gateway/internal/policy"
 	"github.com/int-wc/dlp-agent-gateway/internal/store"
+	"github.com/int-wc/dlp-agent-gateway/internal/webui"
 )
 
 type Server struct {
-	cfg    config.Config
-	store  *store.Store
-	engine *policy.Engine
-	mux    *http.ServeMux
+	cfg       config.Config
+	store     store.Repository
+	engine    *policy.Engine
+	access    *access.Manager
+	rbac      *access.RBAC
+	connector *connector.Connector
+	mux       *http.ServeMux
 }
 type writerContextKey struct{}
 
-func New(cfg config.Config, s *store.Store, e *policy.Engine) *Server {
-	srv := &Server{cfg: cfg, store: s, engine: e, mux: http.NewServeMux()}
+func New(cfg config.Config, repository store.Repository, engine *policy.Engine, manager ...*access.Manager) (*Server, error) {
+	outbound, err := connector.New(cfg.Destinations)
+	if err != nil {
+		return nil, err
+	}
+	rbac, err := access.NewRBAC()
+	if err != nil {
+		return nil, err
+	}
+	var identityManager *access.Manager
+	if len(manager) > 0 {
+		identityManager = manager[0]
+	}
+	srv := &Server{cfg: cfg, store: repository, engine: engine, access: identityManager, rbac: rbac, connector: outbound, mux: http.NewServeMux()}
 	srv.routes()
-	return srv
+	return srv, nil
 }
 func (s *Server) Handler() http.Handler {
 	return securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -45,7 +60,14 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /health", s.health)
 	s.mux.HandleFunc("GET /ready", s.ready)
-	s.mux.HandleFunc("GET /console", s.console)
+	s.mux.HandleFunc("GET /auth/login", s.login)
+	s.mux.HandleFunc("GET /auth/callback", s.callback)
+	s.mux.HandleFunc("POST /auth/logout", s.logout)
+	s.mux.HandleFunc("GET /v1/auth/session", s.authSession)
+	s.mux.HandleFunc("GET /console", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/console/", http.StatusMovedPermanently)
+	})
+	s.mux.Handle("GET /console/", webui.Handler())
 	s.mux.HandleFunc("GET /v1/destinations", s.destinations)
 	s.mux.HandleFunc("POST /v1/check/{destination}", s.check)
 	s.mux.HandleFunc("POST /v1/forward/{destination}", s.forward)
@@ -64,29 +86,27 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/admin/events", s.events)
 }
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, map[string]any{"status": "ok", "version": "0.2.0", "analyzer_enabled": s.cfg.AnalyzerURL != "", "model_enabled": s.cfg.OllamaModel != ""})
+	writeJSON(w, 200, map[string]any{
+		"status": "ok", "version": "0.3.0", "analyzer_enabled": s.cfg.AnalyzerURL != "", "model_enabled": s.cfg.OllamaModel != "",
+		"storage": s.cfg.StorageBackend(), "oidc_enabled": s.cfg.OIDCEnabled(), "mtls_required": s.cfg.RequireMTLS,
+	})
 }
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
-	if s.cfg.AnalyzerURL == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "analyzer": "disabled"})
-		return
-	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
+	if err := s.store.Ready(ctx); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "degraded", "database": "unavailable"})
+		return
+	}
+	if s.cfg.AnalyzerURL == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "database": "ready", "analyzer": "disabled"})
+		return
+	}
 	if !s.engine.AnalyzerReady(ctx) {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "degraded", "analyzer": "unavailable"})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "degraded", "database": "ready", "analyzer": "unavailable"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "analyzer": "ready"})
-}
-func (s *Server) console(w http.ResponseWriter, r *http.Request) {
-	data, err := os.ReadFile(s.cfg.ConsolePath)
-	if err != nil {
-		writeError(w, 404, "console_not_found")
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write(data)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "database": "ready", "analyzer": "ready"})
 }
 func (s *Server) destinations(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.clientActor(w, r); !ok {
@@ -94,7 +114,13 @@ func (s *Server) destinations(w http.ResponseWriter, r *http.Request) {
 	}
 	result := map[string]any{}
 	for name, d := range s.cfg.Destinations {
-		result[name] = map[string]any{"kind": d.Kind, "forwarding_configured": d.URL != ""}
+		authMode := "none"
+		if d.ClientCertFile != "" {
+			authMode = "mtls"
+		} else if d.CredentialEnv != "" {
+			authMode = "bearer"
+		}
+		result[name] = map[string]any{"kind": d.Kind, "forwarding_configured": d.URL != "", "upstream_auth": authMode}
 	}
 	writeJSON(w, 200, result)
 }
@@ -161,8 +187,22 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request, doForward bool) 
 		writeJSON(w, status, map[string]any{"audit_id": id, "reason": reason})
 		return
 	}
-	policies, _ := s.store.Policies()
-	decision := s.engine.Inspect(r.Context(), data, filename, destination, s.store.UserStatus(actor), policies, s.store.Approved(actor, destinationName, digest))
+	policies, err := s.store.Policies()
+	if err != nil {
+		s.writeRejectedUpload(w, http.StatusServiceUnavailable, actor, destinationName, filename, size, "policy_state_unavailable")
+		return
+	}
+	actorStatus, err := s.store.UserStatus(actor)
+	if err != nil {
+		s.writeRejectedUpload(w, http.StatusServiceUnavailable, actor, destinationName, filename, size, "identity_state_unavailable")
+		return
+	}
+	approved, err := s.store.Approved(actor, destinationName, digest)
+	if err != nil {
+		s.writeRejectedUpload(w, http.StatusServiceUnavailable, actor, destinationName, filename, size, "exception_state_unavailable")
+		return
+	}
+	decision := s.engine.Inspect(r.Context(), data, filename, destination, actorStatus, policies, approved)
 	transferStatus := "not_requested"
 	if doForward {
 		transferStatus = "not_attempted"
@@ -189,7 +229,7 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request, doForward bool) 
 		writeErrorWithAudit(w, 503, id, "forwarding_not_configured")
 		return
 	}
-	status, reason := s.sendUpstream(r, destination.URL, filename, data, id)
+	status, reason := s.connector.Forward(r.Context(), destinationName, destination, filename, data, id)
 	if reason != "" {
 		var upstreamStatus *int
 		if status > 0 {
@@ -223,38 +263,6 @@ func (s *Server) writeRejectedUpload(w http.ResponseWriter, status int, actor, d
 	}
 	writeJSON(w, status, map[string]any{"detail": reason, "audit_id": id})
 }
-func (s *Server) sendUpstream(r *http.Request, url, filename string, data []byte, auditID int64) (int, string) {
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	part, err := writer.CreateFormFile("file", filename)
-	if err != nil {
-		return 0, err.Error()
-	}
-	if _, err = part.Write(data); err != nil {
-		return 0, err.Error()
-	}
-	if err = writer.Close(); err != nil {
-		return 0, err.Error()
-	}
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, url, &body)
-	if err != nil {
-		return 0, err.Error()
-	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	req.Header.Set("X-DLP-Audit-ID", strconv.FormatInt(auditID, 10))
-	client := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0, "upstream_unavailable"
-	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return resp.StatusCode, "upstream_rejected"
-	}
-	return resp.StatusCode, ""
-}
-
 func (s *Server) requestException(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.clientActor(w, r)
 	if !ok {
@@ -371,14 +379,19 @@ func (s *Server) adminUsers(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOK(w, r) {
 		return
 	}
-	writeJSON(w, 200, s.store.Users(s.cfg.ClientKeys))
+	items, err := s.store.Users(s.cfg.Actors())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "query_failed")
+		return
+	}
+	writeJSON(w, 200, items)
 }
 func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOK(w, r) {
 		return
 	}
 	actor := r.PathValue("actor")
-	if _, ok := s.cfg.ClientKeys[actor]; !ok {
+	if _, ok := s.cfg.Actors()[actor]; !ok {
 		writeError(w, 404, "unknown_actor")
 		return
 	}
@@ -492,9 +505,18 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request) {
 	counts := map[string]int{"allow": 0, "review": 0, "block": 0}
 	transferCounts := map[string]int{"not_requested": 0, "not_attempted": 0, "pending": 0, "not_configured": 0, "failed": 0, "forwarded": 0}
 	top := map[string]int{}
+	daily := map[string]map[string]int{}
 	for _, a := range audits {
 		counts[a.Action]++
 		transferCounts[a.TransferStatus]++
+		day := "unknown"
+		if created, parseErr := time.Parse(time.RFC3339, a.CreatedAt); parseErr == nil {
+			day = created.UTC().Format("2006-01-02")
+		}
+		if daily[day] == nil {
+			daily[day] = map[string]int{"allow": 0, "review": 0, "block": 0}
+		}
+		daily[day][a.Action]++
 		for _, reason := range a.Reasons {
 			top[reason]++
 		}
@@ -517,7 +539,7 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	writeJSON(w, 200, map[string]any{"days": days, "total": len(audits), "counts": counts, "transfer_counts": transferCounts, "top_reasons": top, "false_positive_policy_candidates": suggestions, "note": "Feedback generates suggestions only; no automatic policy changes."})
+	writeJSON(w, 200, map[string]any{"days": days, "total": len(audits), "counts": counts, "transfer_counts": transferCounts, "daily_counts": daily, "top_reasons": top, "false_positive_policy_candidates": suggestions, "note": "Feedback generates suggestions only; no automatic policy changes."})
 }
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOK(w, r) {
@@ -532,6 +554,13 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) clientActor(w http.ResponseWriter, r *http.Request) (string, bool) {
+	if actor, ok := access.MTLSActor(r, s.cfg.MTLSActors); ok {
+		return actor, true
+	}
+	if s.cfg.RequireMTLS {
+		writeError(w, http.StatusUnauthorized, "verified_client_certificate_required")
+		return "", false
+	}
 	token, ok := bearer(r)
 	if !ok {
 		writeError(w, 401, "bearer_token_required")
@@ -546,16 +575,64 @@ func (s *Server) clientActor(w http.ResponseWriter, r *http.Request) (string, bo
 	return "", false
 }
 func (s *Server) adminOK(w http.ResponseWriter, r *http.Request) bool {
-	token, ok := bearer(r)
-	if !ok {
-		writeError(w, 401, "bearer_token_required")
+	role := ""
+	if token, ok := bearer(r); ok && s.cfg.AdminKey != "" && hmac.Equal([]byte(token), []byte(s.cfg.AdminKey)) {
+		role = "admin"
+	} else if identity, ok := s.access.Identity(r); ok {
+		role = identity.Role
+	}
+	if role == "" {
+		writeError(w, http.StatusUnauthorized, "admin_authentication_required")
 		return false
 	}
-	if !hmac.Equal([]byte(token), []byte(s.cfg.AdminKey)) {
-		writeError(w, 401, "invalid_admin_token")
+	if !s.rbac.Allowed(role, r.URL.Path, r.Method) {
+		writeError(w, http.StatusForbidden, "insufficient_role")
 		return false
 	}
 	return true
+}
+
+func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	if s.access == nil {
+		writeError(w, http.StatusNotFound, "oidc_not_configured")
+		return
+	}
+	s.access.Login(w, r)
+}
+
+func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
+	if s.access == nil {
+		writeError(w, http.StatusNotFound, "oidc_not_configured")
+		return
+	}
+	s.access.Callback(w, r)
+}
+
+func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+	if s.access == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"logged_out": true})
+		return
+	}
+	s.access.Logout(w, r)
+}
+
+func (s *Server) authSession(w http.ResponseWriter, r *http.Request) {
+	if token, ok := bearer(r); ok && s.cfg.AdminKey != "" && hmac.Equal([]byte(token), []byte(s.cfg.AdminKey)) {
+		writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "mode": "static", "identity": access.Identity{Subject: "local-admin", Name: "Local administrator", Role: "admin"}})
+		return
+	}
+	if identity, ok := s.access.Identity(r); ok {
+		writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "mode": "oidc", "identity": identity})
+		return
+	}
+	mode := "static"
+	if s.cfg.OIDCEnabled() {
+		mode = "oidc"
+		if s.cfg.AdminKey != "" {
+			mode = "oidc_or_static"
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"authenticated": false, "mode": mode})
 }
 func decodeJSON(r *http.Request, value any) bool {
 	w, ok := r.Context().Value(writerContextKey{}).(http.ResponseWriter)
@@ -638,7 +715,7 @@ func safeAuditLabel(value string, maxRunes int) string {
 }
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self' data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")

@@ -9,3 +9,7 @@ var/
 .DS_Store
 *.egg-info/
 /dlp-gateway
+web/node_modules/
+web/*.tsbuildinfo
+web/vite.config.js
+web/vite.config.d.ts

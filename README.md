@@ -12,35 +12,37 @@
 
 ```text
 业务系统
-   │ Bearer 身份 + 服务端允许的目标
+   │ Bearer 或已验证 mTLS 工作负载身份
    ▼
 Go Gateway (:18080)
    ├─ 上传限制 / SHA-256 / 鉴权
    ├─ 内置硬规则 + 动态策略 + 人员状态
-   ├─ 原子 JSON 审计存储
+   ├─ PostgreSQL 审计 / 策略 / 审批存储
+   ├─ OIDC + Casbin RBAC 运营身份
    ├─ 可选本地 Ollama 建议
-   └─ 仅 allow 时转发同一份文件字节
+   └─ 仅 allow 时向固定业务连接器转发同一份字节
            │
            └─ PDF / DOCX / 图片 ──► Python Analyzer (:19090)
                                       有界解析 / 可选 Tesseract OCR
 ```
 
-核心路径按分层边界组织：`cmd/dlp-gateway` 负责进程生命周期，`internal/httpapi` 负责传输与认证，`internal/policy` 负责决策，`internal/analyzer` 负责编排解析服务，`internal/store` 隔离持久化实现。存储层可在不改变 HTTP 和策略契约的情况下替换为 PostgreSQL。
+核心路径按分层边界组织：`cmd/dlp-gateway` 负责进程生命周期，`internal/httpapi` 负责 HTTP 契约，`internal/access` 负责 OIDC、RBAC 与 mTLS，`internal/connector` 负责固定下游连接，`internal/policy` 负责决策，`internal/analyzer` 负责编排解析服务，`internal/store` 提供 PostgreSQL 和单机 JSON 两种仓储实现。React 运营台构建后嵌入 Go 二进制。
 
 ### 当前能力
 
 | 模块 | 已实现 |
 | --- | --- |
-| 上传网关 | Go 标准库 HTTP 服务；Bearer 身份；8 MiB 文件上限；服务端目标白名单；安全响应头；超时与优雅关闭。 |
+| 上传网关 | Go 标准库 HTTP 服务；Bearer 或 mTLS 业务身份；8 MiB 文件上限；服务端目标白名单；TLS、安全响应头、超时与优雅关闭。 |
 | 内容解析 | Go 直接处理 UTF-8 文本、代码、CSV、JSON；可选 Python Worker 处理文字型 PDF（最多 30 页）、DOCX 和 PNG/JPEG OCR。解析失败、空白、超限和不支持格式均进入 `review`。 |
 | 风险决策 | 私钥、AWS Access Key、身份证号/手机号候选特征；动态字面关键词策略；离职/重点人员状态；可选本地 Ollama。模型只可提高审查强度。 |
-| 运营闭环 | 内容判定与传输结果分开留痕；已认证但格式错误或目标无效的上传也记录；支持审计列表、策略/人员状态、临时例外、管理员事件、误报反馈和完整 1–90 天窗口统计。 |
-| 控制台与探针 | `/console` 支持空库展示和合成文件检查；`/health` 是进程存活探针，`/ready` 会在已配置 Analyzer 但不可用时返回 503。 |
-| 受控转发 | 只有调用 `/v1/forward/...`、判定为 `allow` 且目标预先配置时才转发；禁止任意 URL，禁止跟随重定向。 |
+| 运营闭环 | PostgreSQL 自动迁移；内容判定与传输结果分开留痕；审计、事件处置、策略、人员、临时例外、误报反馈和完整 1–90 天统计。数据库状态读取失败时上传失败关闭。 |
+| 运营台与身份 | React + TypeScript + Ant Design + TanStack Query + ECharts；OIDC 授权码 + PKCE；`viewer`、`operator`、`admin` 三档 Casbin RBAC；静态管理员密钥仅作本地兼容。 |
+| 受控转发 | 只有调用 `/v1/forward/...`、判定为 `allow` 且目标预先配置时才转发；下游支持间接环境变量 Bearer 和 mTLS，禁止任意 URL与重定向。 |
+| 探针 | `/health` 报告存储、OIDC、mTLS、Analyzer 和模型模式；`/ready` 同时检查数据库和已配置 Analyzer。 |
 
 ### 快速开始
 
-需要 Go 1.23+。Python 3.11+ 仅在启用复杂文档解析 Worker 或运行 Python 回归测试时需要。
+需要 Go 1.23+。仓库已经包含构建后的运营台；只有修改前端时才需要 Node.js 22+。Python 3.11+ 仅在启用复杂文档解析 Worker 或运行 Python 回归测试时需要。
 
 1. 准备配置。示例密钥不能直接使用，管理员和客户端密钥必须不同且至少 24 个字符：
 
@@ -75,7 +77,7 @@ python3 -m venv .venv
 
 图片 OCR 还需安装 `pip install -e ".[ocr]"` 和系统的 `tesseract`。缺少 OCR 依赖时图片进入 `review`。
 
-4. 打开 [http://127.0.0.1:18080/console](http://127.0.0.1:18080/console)，可直接输入客户端密钥并选择合成文件完成检查；输入管理员密钥后可查看刚生成的审计。也可以使用命令行：
+4. 打开 [http://127.0.0.1:18080/console/](http://127.0.0.1:18080/console/)，使用管理员密钥进入运营台，再到“集成与测试”使用客户端身份验证合成文件。也可以使用命令行：
 
 ```bash
 curl -sS -H "Authorization: Bearer YOUR_CLIENT_KEY" \
@@ -93,7 +95,14 @@ curl -sS -H "Authorization: Bearer YOUR_CLIENT_KEY" \
 docker compose up --build
 ```
 
-Compose 启动 Go Gateway 和 Python Analyzer 两个非 root、只读根文件系统的服务。网关只映射到 `127.0.0.1:18080`，不会占用 `8080`；Analyzer 只在 Compose 内部网络暴露。审计数据保存在命名卷。
+Compose 启动 Go Gateway、Python Analyzer 和 PostgreSQL。网关只映射到 `127.0.0.1:18080`，不会占用 `8080`；Analyzer 与数据库只在 Compose 内部网络暴露，审计数据保存在 PostgreSQL 命名卷。首次启动会自动执行内嵌的版本化迁移。
+
+### 企业身份与业务入口
+
+- 运营人员：配置 `DLP_OIDC_*` 后，控制台使用 OIDC 授权码流程、PKCE、带签名的 HttpOnly 会话 Cookie。身份提供方角色映射为 `dlp-viewer`、`dlp-operator`、`dlp-admin`；名称可以通过环境变量调整。
+- 上传工作负载：可继续使用每身份 Bearer 密钥，或配置网关 TLS、客户端 CA、`DLP_MTLS_ACTORS_JSON`。证书只在 TLS 验证链有效且 URI/DNS/Email/CN 明确映射时产生业务身份。
+- 下游业务系统：`DLP_DESTINATIONS_JSON` 中只保存固定 HTTPS 地址和秘密所在的环境变量名；连接器支持固定 multipart 字段、私有 CA、Bearer 或客户端证书，不接受请求方提供 URL。
+- 真正连接 OA、GitLab 或其他业务系统前，需要得到该系统所有者授权，并在私有环境配置 URL、证书或服务令牌。仓库和示例不包含真实接口或凭据。
 
 ### API 工作流
 
@@ -103,7 +112,7 @@ Compose 启动 Go Gateway 和 Python Analyzer 两个非 root、只读根文件�
 4. 对可配置策略命中的审计，客户端可向 `POST /v1/exceptions` 提交 `audit_id` 和理由；批准只对同一身份、目标和完全相同的文件字节有效，且不能绕过秘密、人员、个人信息或模型故障规则。
 5. 误报反馈只生成策略优化候选，不自动修改策略。
 
-默认目标 `internal-demo` 和 `external-demo` 仅检查。要演示转发，在 `DLP_DESTINATIONS_JSON` 中配置固定 URL，例如 `{"internal-demo":{"kind":"internal","url":"http://127.0.0.1:9000/upload"}}`。非本机目标必须使用 HTTPS。下游非 2xx、重定向或超时均不会标记为成功，也不会把下游响应正文返回客户端。
+默认目标 `internal-demo` 和 `external-demo` 仅检查。要接入获授权的业务上传接口，在私有配置中增加固定 URL，例如 `{"business-upload":{"kind":"internal","url":"https://business.example/upload","credential_env":"BUSINESS_UPLOAD_TOKEN","upload_field":"file"}}`。非本机目标必须使用 HTTPS。下游非 2xx、重定向或超时均不会标记为成功，也不会把下游响应正文返回客户端。
 
 ### 本地模型
 
@@ -112,19 +121,22 @@ Compose 启动 Go Gateway 和 Python Analyzer 两个非 root、只读根文件�
 ### 测试
 
 ```bash
+npm --prefix web ci
+npm --prefix web run typecheck
+npm --prefix web run build
 go test -race ./...
 go build ./cmd/dlp-gateway
 .venv/bin/python -m pytest -q
 ```
 
-GitHub Actions 同时运行 Go 测试、Go 构建和 Python 回归测试。测试数据全部为合成内容。
+GitHub Actions 同时构建前端、运行 Go race 测试（包含临时 PostgreSQL 服务）、Go 构建、Python 回归测试和两个容器构建。测试数据全部为合成内容。
 
 ### 安全边界
 
 - 这是主动接入的策略执行点，不是透明流量拦截器；绕过网关的上传也会绕过检查。
-- 当前 Bearer 密钥与本地控制台只适合演示。生产环境需要 mTLS/SSO 或签名工作负载身份、RBAC、职责分离、密钥轮换、TLS 和集中式密钥管理。
+- OIDC、mTLS 与 RBAC 已提供集成能力，但是否符合生产要求仍取决于身份提供方、PKI、入口代理、证书轮换、会话策略、TLS 终止和职责分离配置。
 - Python Worker 与网关分进程，但当前容器配置仍不是强沙箱。生产环境需要解析任务队列、CPU/内存/时间配额、恶意软件扫描、内容类型核验和反向代理级请求限制。
-- 当前原子 JSON 存储提供 `0600` 权限、临时文件写入、文件及目录 `fsync` 和原子重命名，只适合单实例演示。它可留痕但不可防篡改，也没有事务数据库的并发、查询、备份、加密和高可用能力；生产环境应替换为 PostgreSQL 或其他受管数据库，并配置审计保留、导出与删除策略。
+- Docker Compose 已使用 PostgreSQL；直接运行二进制且未设置 `DLP_DATABASE_URL` 时仍回退到单实例原子 JSON。生产部署还必须配置 PostgreSQL TLS、备份恢复、加密、保留与删除、不可变导出和高可用，而不是把“用了 PostgreSQL”等同于审计合规。
 - 应用会记录通过身份认证后的上传判定与早期拒绝；无法识别身份的鉴权失败不写入应用 JSON，以免匿名请求造成同步磁盘写入型拒绝服务。生产环境应由限流的入口代理或 SIEM 记录这类访问安全日志。
 - PDF 扫描页 OCR、XLSX/PPTX、嵌套压缩包、加密文档和复杂嵌入内容尚未覆盖，均应进入复核。格式提取不等于内容全覆盖。
 - 正则会误报，模型会误判或受文档中指令干扰。任何策略优化都应人工批准并经过回归测试。
@@ -135,11 +147,11 @@ GitHub Actions 同时运行 Go 测试、Go 构建和 Python 回归测试。测�
 ### 路线图
 
 1. 将解析任务迁入带资源配额的隔离队列，增加 PDF 页面 OCR、XLSX/PPTX、文件类型校验和恶意软件扫描。
-2. 用 PostgreSQL、OIDC/mTLS、RBAC、审计保留与加密替换演示组件。
-3. 增加可靠的异步大文件隔离、幂等下游投递、OpenSearch/Elasticsearch 导出和周期报告。
+2. 增加可靠的异步大文件隔离、幂等下游投递、OpenSearch/Elasticsearch 导出和可计划交付的报告。
+3. 完成 PostgreSQL 备份恢复、保留/删除、不可变导出，以及生产 PKI/OIDC 部署指南和安全基线。
 4. 使用合成或明确授权的标注样本评估模型，建立人工审批的策略优化回归闭环。
 
-MIT License。贡献内容须使用合成数据并附测试。
+MIT License。贡献内容须使用合成数据并附测试。主要依赖许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## English
 
@@ -151,35 +163,37 @@ This repository is intended for portfolio demonstration, architecture evaluation
 
 ```text
 business application
-   │ Bearer identity + server-allowlisted destination
+   │ Bearer or verified mTLS workload identity
    ▼
 Go Gateway (:18080)
    ├─ upload bounds / SHA-256 / authentication
    ├─ hard guards + dynamic policies + personnel state
-   ├─ atomic JSON audit store
+   ├─ PostgreSQL audit / policy / approval store
+   ├─ OIDC + Casbin RBAC for operators
    ├─ optional local Ollama advisory
-   └─ forwards the exact bytes only after allow
+   └─ forwards exact bytes through a fixed connector only after allow
            │
            └─ PDF / DOCX / image ──► Python Analyzer (:19090)
                                       bounded parsing / optional Tesseract OCR
 ```
 
-The primary path is split by responsibility: `cmd/dlp-gateway` owns process lifecycle, `internal/httpapi` owns transport and authentication, `internal/policy` owns decisions, `internal/analyzer` orchestrates the parser service, and `internal/store` isolates persistence. The store can later be replaced with PostgreSQL without changing HTTP or policy contracts.
+The primary path is split by responsibility: `cmd/dlp-gateway` owns process lifecycle, `internal/httpapi` owns HTTP contracts, `internal/access` owns OIDC, RBAC, and mTLS, `internal/connector` owns fixed downstream integration, `internal/policy` owns decisions, `internal/analyzer` orchestrates parsing, and `internal/store` provides PostgreSQL and standalone JSON repositories. The built React console is embedded in the Go binary.
 
 ### Current capabilities
 
 | Area | Implemented |
 | --- | --- |
-| Upload gateway | Go standard-library HTTP server; Bearer identity; 8 MiB file limit; server-side destination allowlist; security headers; timeouts and graceful shutdown. |
+| Upload gateway | Go standard-library HTTP server; Bearer or mTLS workload identity; 8 MiB limit; destination allowlist; TLS, security headers, timeouts, and graceful shutdown. |
 | Extraction | Go handles UTF-8 text, code, CSV, and JSON directly. The optional Python worker handles text-based PDF (up to 30 pages), DOCX, and PNG/JPEG OCR. Parse failures, blank input, over-limit input, and unsupported formats require `review`. |
 | Decision | Private-key, AWS key, ID/phone candidate signals; dynamic literal policies; departing/privileged personnel state; optional local Ollama. Model output may escalate only. |
-| Operations | Separate content-decision and transfer outcomes; authenticated malformed/unknown-target attempts are audited; audit list, policy/personnel controls, scoped exceptions, admin events, feedback, and full-window 1–90-day reports. |
-| Console and probes | `/console` handles an empty store and can inspect a synthetic file; `/health` is liveness, while `/ready` returns 503 when a configured Analyzer is unavailable. |
-| Controlled forwarding | Forwarding requires an explicit `/v1/forward/...` call, an `allow` decision, and a preconfigured receiver. Arbitrary URLs and redirects are rejected. |
+| Operations | Automatic PostgreSQL migrations; separate content and transfer outcomes; audit, incident triage, policies, people risk, scoped exceptions, feedback, and full-window 1–90-day reports. Policy-state read failures fail closed. |
+| Console and identity | React + TypeScript + Ant Design + TanStack Query + ECharts; OIDC authorization code + PKCE; Casbin `viewer`, `operator`, and `admin` roles; a static admin key remains only for local compatibility. |
+| Controlled forwarding | `/v1/forward/...` requires `allow` and a preconfigured target. Connectors support indirect environment-variable Bearer credentials and mTLS. Arbitrary URLs and redirects are rejected. |
+| Probes | `/health` reports storage, OIDC, mTLS, Analyzer, and model modes. `/ready` checks the database and the configured Analyzer. |
 
 ### Quick start
 
-Go 1.23+ is required. Python 3.11+ is needed only for the rich-document Analyzer or Python regression tests.
+Go 1.23+ is required. Built console assets are committed; Node.js 22+ is needed only when changing the frontend. Python 3.11+ is needed only for the rich-document Analyzer or Python regression tests.
 
 1. Prepare configuration. Never use the placeholder keys; the admin and client keys must be distinct and at least 24 characters:
 
@@ -214,7 +228,7 @@ python3 -m venv .venv
 
 Image OCR additionally requires `pip install -e ".[ocr]"` and the system `tesseract` binary. Images require `review` when OCR is unavailable.
 
-4. Open [http://127.0.0.1:18080/console](http://127.0.0.1:18080/console). You can enter a client key and inspect a synthetic file directly, then enter the admin key to view the resulting audit. Or use the command line:
+4. Open [http://127.0.0.1:18080/console/](http://127.0.0.1:18080/console/). Enter the admin key, then use Integration & Test Lab with a client identity and a synthetic file. Or use the command line:
 
 ```bash
 curl -sS -H "Authorization: Bearer YOUR_CLIENT_KEY" \
@@ -232,7 +246,14 @@ After preparing `.env` with random keys, run:
 docker compose up --build
 ```
 
-Compose starts the Go Gateway and Python Analyzer as non-root services with read-only root filesystems. The gateway binds only to `127.0.0.1:18080` and does not use `8080`. The Analyzer is exposed only on the Compose network, and audit state lives in a named volume.
+Compose starts the Go Gateway, Python Analyzer, and PostgreSQL. The gateway binds only to `127.0.0.1:18080` and does not use `8080`. The Analyzer and database remain on the Compose network, audit state lives in a PostgreSQL volume, and embedded versioned migrations run on startup.
+
+### Enterprise identity and business entry
+
+- Operators: configure `DLP_OIDC_*` to use authorization code flow, PKCE, and a signed HttpOnly session cookie. Provider roles map to `dlp-viewer`, `dlp-operator`, and `dlp-admin` by default.
+- Upload workloads: use per-identity Bearer keys, or configure gateway TLS, a client CA, and `DLP_MTLS_ACTORS_JSON`. A certificate creates an actor only when its verification chain is valid and an URI/DNS/Email/CN identity is explicitly mapped.
+- Downstream systems: `DLP_DESTINATIONS_JSON` stores a fixed HTTPS address and the name of the environment variable that holds a secret. A connector can set a fixed multipart field, private CA, Bearer credential, or client certificate, and never accepts a caller-provided URL.
+- Connecting OA, GitLab, or another real system requires that system owner's authorization and private URL/certificate/service-token configuration. This public repository contains no real endpoint or credential.
 
 ### API workflow
 
@@ -242,7 +263,7 @@ Compose starts the Go Gateway and Python Analyzer as non-root services with read
 4. For a configurable policy hit, a client may submit `audit_id` and a justification to `POST /v1/exceptions`. Approval is restricted to the same actor, destination, and exact file bytes; it cannot bypass secret, personnel, personal-data, or model-outage guards.
 5. False-positive feedback creates policy-tuning candidates but never mutates policy automatically.
 
-The default `internal-demo` and `external-demo` destinations are check-only. To demonstrate forwarding, configure a fixed URL in `DLP_DESTINATIONS_JSON`, for example `{"internal-demo":{"kind":"internal","url":"http://127.0.0.1:9000/upload"}}`. Non-loopback receivers require HTTPS. Downstream non-2xx responses, redirects, and timeouts are not marked successful, and the downstream response body is never returned.
+The default `internal-demo` and `external-demo` destinations are check-only. To connect an authorized business upload endpoint, add a fixed private configuration such as `{"business-upload":{"kind":"internal","url":"https://business.example/upload","credential_env":"BUSINESS_UPLOAD_TOKEN","upload_field":"file"}}`. Non-loopback receivers require HTTPS. Downstream non-2xx responses, redirects, or timeouts are not marked successful, and downstream response bodies are never returned.
 
 ### Local model
 
@@ -251,19 +272,22 @@ Run Ollama locally and set `DLP_OLLAMA_MODEL=qwen2.5:7b`. The Go gateway sends a
 ### Tests
 
 ```bash
+npm --prefix web ci
+npm --prefix web run typecheck
+npm --prefix web run build
 go test -race ./...
 go build ./cmd/dlp-gateway
 .venv/bin/python -m pytest -q
 ```
 
-GitHub Actions runs Go tests, a Go build, and Python regression tests. All fixtures are synthetic.
+GitHub Actions builds the frontend, runs Go race tests with an ephemeral PostgreSQL service, builds Go, runs Python regressions, and builds both containers. Every fixture is synthetic.
 
 ### Security boundaries
 
 - This is an explicitly integrated policy enforcement point, not a transparent network interceptor. Uploads that bypass it also bypass inspection.
-- Bearer keys and the local console are demo controls. Production requires mTLS/SSO or signed workload identity, RBAC, separation of duties, key rotation, TLS, and centralized secret management.
+- OIDC, mTLS, and RBAC integration is implemented, but production fitness still depends on identity-provider, PKI, ingress, certificate rotation, session, TLS termination, and separation-of-duties configuration.
 - The Python worker is a separate process, but the current containers are not a strong parser sandbox. Production needs a queued parser boundary, CPU/memory/time quotas, malware scanning, content-type verification, and reverse-proxy request limits.
-- The atomic JSON store uses `0600` permissions, a temporary file, file/directory `fsync`, and atomic rename. It records activity but is not tamper-proof, and lacks a transactional database's concurrency, query, backup, encryption, and HA properties. Replace it with PostgreSQL or another managed database and define audit retention, export, and deletion.
+- Docker Compose uses PostgreSQL. A directly started binary without `DLP_DATABASE_URL` still falls back to atomic JSON for a standalone demo. Production also requires PostgreSQL TLS, backup recovery, encryption, retention/deletion, immutable export, and HA; using PostgreSQL alone does not make the audit trail compliant.
 - The application audits upload decisions and early rejections after actor authentication. Unattributable authentication failures are not synchronously persisted to JSON because anonymous traffic could otherwise cause disk-write denial of service. Use a rate-limited ingress proxy or SIEM for those access-security logs in production.
 - OCR for scanned PDF pages, XLSX/PPTX, nested archives, encrypted documents, and complex embedded content are not covered. Such inputs should require review. Format extraction is not proof of full content coverage.
 - Regex signals can produce false positives; models can misclassify or follow document-borne instructions. Policy changes require human approval and regression tests.
@@ -274,8 +298,8 @@ See [SECURITY.md](SECURITY.md) for additional trust boundaries.
 ### Roadmap
 
 1. Move parsing into a resource-limited queue; add PDF page OCR, XLSX/PPTX, file-type verification, and malware scanning.
-2. Replace demo controls with PostgreSQL, OIDC/mTLS, RBAC, encrypted audit retention, and separation of duties.
-3. Add asynchronous large-file quarantine, idempotent downstream delivery, OpenSearch/Elasticsearch export, and scheduled reporting.
+2. Add reliable asynchronous large-file quarantine, idempotent downstream delivery, OpenSearch/Elasticsearch export, and schedulable report delivery.
+3. Add PostgreSQL backup/restore, retention/deletion, immutable export, plus production PKI/OIDC deployment guidance and security baselines.
 4. Evaluate the model with synthetic or explicitly consented labeled samples and require human-approved, regression-tested policy tuning.
 
-MIT licensed. Contributions must use synthetic data and include tests.
+MIT licensed. Contributions must use synthetic data and include tests. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for primary dependency licenses.

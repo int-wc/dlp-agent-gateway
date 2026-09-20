@@ -1,0 +1,84 @@
+export type Action = 'allow' | 'review' | 'block'
+
+export interface Audit {
+  id: number
+  created_at: string
+  actor: string
+  destination: string
+  filename: string
+  sha256: string
+  size: number
+  action: Action
+  reasons: string[]
+  signals: string[]
+  model_status: string
+  forwarded: boolean
+  transfer_status: string
+  upstream_status?: number
+}
+
+export interface Policy {
+  id: number
+  keyword: string
+  action: 'review' | 'block'
+  scope: 'all' | 'internal' | 'external'
+  enabled: boolean
+}
+
+export interface ExceptionRequest {
+  id: number
+  audit_id: number
+  actor: string
+  destination: string
+  sha256: string
+  justification: string
+  status: 'pending' | 'approved' | 'rejected'
+  created_at: string
+  expires_at?: string
+}
+
+export interface UserRisk {
+  actor: string
+  status: 'normal' | 'privileged' | 'departing'
+}
+
+export interface Report {
+  days: number
+  total: number
+  counts: Record<Action, number>
+  transfer_counts: Record<string, number>
+  daily_counts: Record<string, Record<Action, number>>
+  top_reasons: Record<string, number>
+  false_positive_policy_candidates: Record<string, number>
+  note: string
+}
+
+export interface Health {
+  status: string
+  version: string
+  analyzer_enabled: boolean
+  model_enabled: boolean
+  storage: string
+  oidc_enabled: boolean
+  mtls_required: boolean
+}
+
+export interface Identity {
+  subject: string
+  name?: string
+  email?: string
+  role: 'admin' | 'operator' | 'viewer'
+}
+
+export interface Session {
+  authenticated: boolean
+  mode: 'static' | 'oidc' | 'oidc_or_static'
+  identity?: Identity
+}
+
+export interface DestinationInfo {
+  kind: 'internal' | 'external'
+  forwarding_configured: boolean
+  upstream_auth: 'none' | 'bearer' | 'mtls'
+}
+

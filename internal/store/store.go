@@ -1,10 +1,10 @@
 package store
 
-// Store is a small atomic JSON store for the standalone demo binary. The
-// production deployment seam is this package: replace it with PostgreSQL or
-// another transactional store without changing the HTTP/policy contracts.
+// Store is a small atomic JSON implementation for the standalone demo binary.
+// PostgreSQL is available through OpenPostgres for durable deployments.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -85,7 +85,8 @@ func Open(path string) (*Store, error) {
 	s.normalize()
 	return s, nil
 }
-func (s *Store) Close() error { return nil }
+func (s *Store) Close() error                { return nil }
+func (s *Store) Ready(context.Context) error { return nil }
 func (s *Store) normalize() {
 	if s.state.NextIDs == nil {
 		s.state.NextIDs = map[string]int64{}
@@ -166,13 +167,13 @@ func (s *Store) nextIDLocked(kind string) int64 {
 	s.state.NextIDs[kind]++
 	return s.state.NextIDs[kind]
 }
-func (s *Store) UserStatus(actor string) string {
+func (s *Store) UserStatus(actor string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if v, ok := s.state.Users[actor]; ok {
-		return v
+		return v, nil
 	}
-	return "normal"
+	return "normal", nil
 }
 func (s *Store) SetUserStatus(actor, status string) error {
 	s.mu.Lock()
@@ -180,7 +181,7 @@ func (s *Store) SetUserStatus(actor, status string) error {
 	s.state.Users[actor] = status
 	return s.persistLocked()
 }
-func (s *Store) Users(actors map[string]string) []map[string]string {
+func (s *Store) Users(actors map[string]string) ([]map[string]string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := make([]map[string]string, 0, len(actors))
@@ -196,7 +197,7 @@ func (s *Store) Users(actors map[string]string) []map[string]string {
 		}
 		result = append(result, map[string]string{"actor": actor, "status": status})
 	}
-	return result
+	return result, nil
 }
 func (s *Store) Policies() ([]Policy, error) {
 	s.mu.RLock()
@@ -224,7 +225,7 @@ func (s *Store) UpdatePolicy(id int64, p Policy) error {
 	}
 	return errors.New("policy not found")
 }
-func (s *Store) Approved(actor, destination, sha string) bool {
+func (s *Store) Approved(actor, destination, sha string) (bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	current := time.Now().UTC()
@@ -232,11 +233,11 @@ func (s *Store) Approved(actor, destination, sha string) bool {
 		if x.Actor == actor && x.Destination == destination && x.SHA256 == sha && x.Status == "approved" {
 			expires, err := time.Parse(time.RFC3339, x.ExpiresAt)
 			if err == nil && expires.After(current) {
-				return true
+				return true, nil
 			}
 		}
 	}
-	return false
+	return false, nil
 }
 func (s *Store) InsertAudit(a Audit) (int64, error) {
 	s.mu.Lock()

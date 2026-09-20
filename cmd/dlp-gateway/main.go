@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/int-wc/dlp-agent-gateway/internal/access"
 	"github.com/int-wc/dlp-agent-gateway/internal/config"
 	"github.com/int-wc/dlp-agent-gateway/internal/httpapi"
 	"github.com/int-wc/dlp-agent-gateway/internal/policy"
@@ -27,20 +28,55 @@ func main() {
 		logger.Error("create database directory", "error", err)
 		os.Exit(2)
 	}
-	db, err := store.Open(cfg.DBPath)
+	startup, cancelStartup := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelStartup()
+	var repository store.Repository
+	if cfg.DatabaseURL != "" {
+		repository, err = store.OpenPostgres(startup, cfg.DatabaseURL)
+	} else {
+		repository, err = store.Open(cfg.DBPath)
+	}
 	if err != nil {
-		logger.Error("open database", "error", err)
+		logger.Error("open database", "backend", cfg.StorageBackend(), "error", err)
 		os.Exit(2)
 	}
-	defer db.Close()
+	defer repository.Close()
+	identity, err := access.New(startup, access.Options{
+		IssuerURL: cfg.OIDCIssuerURL, ClientID: cfg.OIDCClientID, Secret: cfg.OIDCSecret,
+		RedirectURL: cfg.OIDCRedirect, RoleClaim: cfg.OIDCRoleClaim,
+		AdminRole: cfg.OIDCAdminRole, OperatorRole: cfg.OIDCOperatorRole, ViewerRole: cfg.OIDCViewerRole,
+		SessionSecret: cfg.SessionSecret, CookieSecure: cfg.CookieSecure,
+	})
+	if err != nil {
+		logger.Error("configure OIDC", "error", err)
+		os.Exit(2)
+	}
 	engine := policy.New(cfg)
-	server := &http.Server{Addr: cfg.ListenAddress, Handler: httpapi.New(cfg, db, engine).Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 * 1024}
+	handler, err := httpapi.New(cfg, repository, engine, identity)
+	if err != nil {
+		logger.Error("configure HTTP API", "error", err)
+		os.Exit(2)
+	}
+	server := &http.Server{Addr: cfg.ListenAddress, Handler: handler.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 * 1024}
+	if cfg.TLSCertFile != "" {
+		server.TLSConfig, err = access.ServerTLSConfig(cfg)
+		if err != nil {
+			logger.Error("configure TLS", "error", err)
+			os.Exit(2)
+		}
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {
-		logger.Info("gateway listening", "address", cfg.ListenAddress, "analyzer", cfg.AnalyzerURL != "")
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("server stopped", "error", err)
+		logger.Info("gateway listening", "address", cfg.ListenAddress, "analyzer", cfg.AnalyzerURL != "", "storage", cfg.StorageBackend(), "oidc", cfg.OIDCEnabled(), "tls", cfg.TLSCertFile != "")
+		var serveErr error
+		if cfg.TLSCertFile != "" {
+			serveErr = server.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
+		} else {
+			serveErr = server.ListenAndServe()
+		}
+		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			logger.Error("server stopped", "error", serveErr)
 			stop()
 		}
 	}()
