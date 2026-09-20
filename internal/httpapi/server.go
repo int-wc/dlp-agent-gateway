@@ -81,13 +81,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/admin/exceptions", s.adminExceptions)
 	s.mux.HandleFunc("POST /v1/admin/exceptions/{id}/approve", s.approveException)
 	s.mux.HandleFunc("POST /v1/admin/exceptions/{id}/reject", s.rejectException)
+	s.mux.HandleFunc("GET /v1/admin/feedback", s.adminFeedback)
 	s.mux.HandleFunc("PUT /v1/admin/audits/{id}/feedback", s.feedback)
 	s.mux.HandleFunc("GET /v1/admin/report", s.report)
 	s.mux.HandleFunc("GET /v1/admin/events", s.events)
 }
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
-		"status": "ok", "version": "0.3.0", "analyzer_enabled": s.cfg.AnalyzerURL != "", "model_enabled": s.cfg.OllamaModel != "",
+		"status": "ok", "version": "0.4.0", "analyzer_enabled": s.cfg.AnalyzerURL != "", "model_enabled": s.cfg.OllamaModel != "",
 		"storage": s.cfg.StorageBackend(), "oidc_enabled": s.cfg.OIDCEnabled(), "mtls_required": s.cfg.RequireMTLS,
 	})
 }
@@ -487,6 +488,17 @@ func (s *Server) feedback(w http.ResponseWriter, r *http.Request) {
 	_ = s.store.Event("feedback_recorded", strconv.FormatInt(id, 10))
 	writeJSON(w, 200, map[string]any{"audit_id": id, "verdict": payload.Verdict})
 }
+func (s *Server) adminFeedback(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOK(w, r) {
+		return
+	}
+	items, err := s.store.Feedbacks()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "query_failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
 func (s *Server) report(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOK(w, r) {
 		return
@@ -523,13 +535,44 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request) {
 	}
 	feedbacks, _ := s.store.Feedbacks()
 	falsePositive := map[int64]bool{}
+	feedbackByAudit := map[int64]store.Feedback{}
 	for _, f := range feedbacks {
+		feedbackByAudit[f.AuditID] = f
 		if f.Verdict == "false_positive" {
 			falsePositive[f.AuditID] = true
 		}
 	}
 	suggestions := map[string]int{}
+	riskActors := map[string]bool{}
+	riskCount, remediatedCount, falsePositiveCount, completeInspections := 0, 0, 0, 0
+	var remediationSeconds int64
+	remediationSamples := int64(0)
 	for _, a := range audits {
+		complete := true
+		for _, reason := range a.Reasons {
+			if reason == "unparseable_or_unsupported" || reason == "unsupported_format" || reason == "analyzer_unavailable" || reason == "blank_content" || reason == "file_too_large" {
+				complete = false
+			}
+		}
+		if complete {
+			completeInspections++
+		}
+		if a.Action != "allow" {
+			riskCount++
+			riskActors[a.Actor] = true
+			if item, ok := feedbackByAudit[a.ID]; ok {
+				remediatedCount++
+				if item.Verdict == "false_positive" {
+					falsePositiveCount++
+				}
+				created, auditErr := time.Parse(time.RFC3339, a.CreatedAt)
+				resolved, feedbackErr := time.Parse(time.RFC3339, item.CreatedAt)
+				if auditErr == nil && feedbackErr == nil && !resolved.Before(created) {
+					remediationSeconds += int64(resolved.Sub(created).Seconds())
+					remediationSamples++
+				}
+			}
+		}
 		if !falsePositive[a.ID] {
 			continue
 		}
@@ -539,7 +582,20 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	writeJSON(w, 200, map[string]any{"days": days, "total": len(audits), "counts": counts, "transfer_counts": transferCounts, "daily_counts": daily, "top_reasons": top, "false_positive_policy_candidates": suggestions, "note": "Feedback generates suggestions only; no automatic policy changes."})
+	var meanRemediationSeconds any
+	if remediationSamples > 0 {
+		meanRemediationSeconds = remediationSeconds / remediationSamples
+	}
+	var inspectionCoverage any
+	if len(audits) > 0 {
+		inspectionCoverage = completeInspections * 100 / len(audits)
+	}
+	operations := map[string]any{
+		"active_risks": riskCount - remediatedCount, "remediated": remediatedCount, "false_positives": falsePositiveCount,
+		"mean_time_to_remediate_seconds": meanRemediationSeconds, "inspection_coverage_percent": inspectionCoverage,
+		"high_risk_users": len(riskActors), "active_detectors": len(top),
+	}
+	writeJSON(w, 200, map[string]any{"days": days, "total": len(audits), "counts": counts, "transfer_counts": transferCounts, "daily_counts": daily, "top_reasons": top, "false_positive_policy_candidates": suggestions, "operations": operations, "note": "Feedback generates suggestions only; no automatic policy changes."})
 }
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOK(w, r) {

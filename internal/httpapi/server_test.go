@@ -106,7 +106,7 @@ func adminRequest(t *testing.T, method, url string, body io.Reader) *http.Respon
 
 func TestEmptyAdminCollectionsAndConsoleAreUsable(t *testing.T) {
 	srv := newTestServer(t)
-	for _, endpoint := range []string{"/v1/admin/audits", "/v1/admin/policies", "/v1/admin/exceptions", "/v1/admin/events"} {
+	for _, endpoint := range []string{"/v1/admin/audits", "/v1/admin/policies", "/v1/admin/exceptions", "/v1/admin/events", "/v1/admin/feedback"} {
 		items := bodyJSONArray(t, adminRequest(t, http.MethodGet, srv.URL+endpoint, nil))
 		if items == nil || len(items) != 0 {
 			t.Fatalf("%s=%v, want []", endpoint, items)
@@ -136,7 +136,7 @@ func TestGoGatewayHealthAndFailClosedDecisions(t *testing.T) {
 		t.Fatal(err)
 	}
 	health := bodyJSON(t, resp)
-	if health["status"] != "ok" || health["version"] != "0.3.0" {
+	if health["status"] != "ok" || health["version"] != "0.4.0" {
 		t.Fatalf("health=%v", health)
 	}
 	resp, err = http.Get(srv.URL + "/ready")
@@ -457,12 +457,23 @@ func TestReportAndFeedbackAreNotLimitedToRecent200(t *testing.T) {
 	if report["total"] != float64(205) || report["counts"].(map[string]any)["review"] != float64(205) {
 		t.Fatalf("report=%v", report)
 	}
+	if report["operations"].(map[string]any)["active_risks"] != float64(205) {
+		t.Fatalf("report operations=%v", report["operations"])
+	}
 	payload, _ := json.Marshal(map[string]any{"verdict": "false_positive"})
 	feedback := adminRequest(t, http.MethodPut, srv.URL+"/v1/admin/audits/1/feedback", bytes.NewReader(payload))
 	if feedback.StatusCode != http.StatusOK {
 		t.Fatalf("old audit feedback status=%d body=%v", feedback.StatusCode, bodyJSON(t, feedback))
 	}
 	feedback.Body.Close()
+	feedbackItems := bodyJSONArray(t, adminRequest(t, http.MethodGet, srv.URL+"/v1/admin/feedback", nil))
+	if len(feedbackItems) != 1 || feedbackItems[0]["audit_id"] != float64(1) || feedbackItems[0]["verdict"] != "false_positive" {
+		t.Fatalf("feedback items=%v", feedbackItems)
+	}
+	report = bodyJSON(t, adminRequest(t, http.MethodGet, srv.URL+"/v1/admin/report?days=7", nil))
+	if report["operations"].(map[string]any)["remediated"] != float64(1) || report["operations"].(map[string]any)["false_positives"] != float64(1) {
+		t.Fatalf("feedback operations=%v", report["operations"])
+	}
 }
 
 func TestGoStorePersistsAtomicAudit(t *testing.T) {

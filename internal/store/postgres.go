@@ -339,7 +339,7 @@ func (p *Postgres) Feedback(auditID int64, verdict, note string) error {
 func (p *Postgres) Feedbacks() ([]Feedback, error) {
 	ctx, cancel := dbContext()
 	defer cancel()
-	rows, err := p.pool.Query(ctx, "SELECT audit_id,verdict,note,created_at FROM feedback")
+	rows, err := p.pool.Query(ctx, "SELECT audit_id,verdict,note,created_at FROM feedback ORDER BY created_at DESC")
 	if err != nil {
 		return nil, err
 	}

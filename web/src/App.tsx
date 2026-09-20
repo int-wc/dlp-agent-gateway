@@ -38,7 +38,7 @@ const navigation = [
 
 export default function App() {
   const [page, setPage] = useState(() => location.hash.slice(1) || 'dashboard')
-  const [collapsed, setCollapsed] = useState(false)
+  const [collapsed, setCollapsed] = useState(() => window.innerWidth <= 900)
   const queryClient = useQueryClient()
   const health = useQuery({ queryKey: ['health'], queryFn: getHealth, refetchInterval: 30_000 })
   const sessionQuery = useQuery({ queryKey: ['session'], queryFn: getSession, retry: false })
@@ -47,6 +47,12 @@ export default function App() {
     const listener = () => setPage(location.hash.slice(1) || 'dashboard')
     window.addEventListener('hashchange', listener)
     return () => window.removeEventListener('hashchange', listener)
+  }, [])
+
+  useEffect(() => {
+    const compact = () => { if (window.innerWidth <= 900) setCollapsed(true) }
+    window.addEventListener('resize', compact)
+    return () => window.removeEventListener('resize', compact)
   }, [])
 
   const authenticate = async (_account: string, password: string) => {
@@ -80,7 +86,7 @@ export default function App() {
     <Sider width={246} collapsedWidth={76} collapsed={collapsed} className="app-sider" trigger={null}>
       <div className="brand"><div className="brand-mark"><SafetyCertificateOutlined /></div>{!collapsed && <div><strong>Sentinel Gate</strong><span>DLP Operations</span></div>}</div>
       <Menu mode="inline" theme="dark" selectedKeys={[page]} items={navigation} onClick={({ key }) => go(key)} className="app-menu" />
-      {!collapsed && <div className="sider-foot"><ExperimentOutlined /><span>Reference build · v{health.data?.version ?? '0.3'}</span></div>}
+      {!collapsed && <div className="sider-foot"><ExperimentOutlined /><span>Reference build · v{health.data?.version ?? '0.4'}</span></div>}
     </Sider>
     <Layout>
       <Header className="app-header">

@@ -379,6 +379,9 @@ func (s *Store) Feedbacks() ([]Feedback, error) {
 	for _, f := range s.state.Feedback {
 		result = append(result, f)
 	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].CreatedAt > result[j].CreatedAt
+	})
 	return result, nil
 }
 func (s *Store) Event(event, target string) error {

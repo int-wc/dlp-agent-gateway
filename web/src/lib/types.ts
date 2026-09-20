@@ -37,6 +37,20 @@ export interface ExceptionRequest {
   expires_at?: string
 }
 
+export interface Feedback {
+  audit_id: number
+  verdict: 'true_positive' | 'false_positive'
+  note: string
+  created_at: string
+}
+
+export interface AdminEvent {
+  id: number
+  created_at: string
+  event: string
+  target: string
+}
+
 export interface UserRisk {
   actor: string
   status: 'normal' | 'privileged' | 'departing'
@@ -50,6 +64,15 @@ export interface Report {
   daily_counts: Record<string, Record<Action, number>>
   top_reasons: Record<string, number>
   false_positive_policy_candidates: Record<string, number>
+  operations: {
+    active_risks: number
+    remediated: number
+    false_positives: number
+    mean_time_to_remediate_seconds: number | null
+    inspection_coverage_percent: number | null
+    high_risk_users: number
+    active_detectors: number
+  }
   note: string
 }
 
@@ -81,4 +104,3 @@ export interface DestinationInfo {
   forwarding_configured: boolean
   upstream_auth: 'none' | 'bearer' | 'mtls'
 }
-

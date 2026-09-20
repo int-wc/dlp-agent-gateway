@@ -1,11 +1,17 @@
-import { Card } from 'antd'
-import { AuditTable } from '../components/AuditTable'
+import { SyncOutlined } from '@ant-design/icons'
+import { Button } from 'antd'
+import { useQueryClient } from '@tanstack/react-query'
+import { IncidentWorkbench } from '../components/IncidentWorkbench'
 import { PageHeader } from '../components/PageHeader'
-import { useAudits } from '../hooks/useOperations'
+import { operationsKeys, useAudits, useExceptions, useFeedback } from '../hooks/useOperations'
 
 export function Incidents({ canOperate }: { canOperate: boolean }) {
   const audits = useAudits()
-  return <><PageHeader eyebrow="Triage queue" title="事件中心" description="集中处理待复核和已阻断事件，保留每一次人工判断。" />
-    <Card className="section-card"><AuditTable audits={audits.data ?? []} loading={audits.isLoading} incidentsOnly canOperate={canOperate} /></Card></>
+  const feedback = useFeedback()
+  const exceptions = useExceptions()
+  const queryClient = useQueryClient()
+  const refreshing = audits.isFetching || feedback.isFetching || exceptions.isFetching
+  return <><PageHeader eyebrow="Investigation workspace" title="事件中心" description="从风险队列进入证据链、关联活动与人工处置，所有结论都保留在审计记录中。" extra={<Button icon={<SyncOutlined spin={refreshing} />} onClick={() => queryClient.invalidateQueries({ queryKey: operationsKeys.all })}>刷新数据</Button>} />
+    <IncidentWorkbench audits={audits.data ?? []} feedback={feedback.data ?? []} exceptions={exceptions.data ?? []} loading={audits.isLoading || feedback.isLoading || exceptions.isLoading} canOperate={canOperate} />
+  </>
 }
-

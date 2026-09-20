@@ -1,4 +1,4 @@
-import type { Audit, DestinationInfo, ExceptionRequest, Health, Policy, Report, Session, UserRisk } from './types'
+import type { AdminEvent, Audit, DestinationInfo, ExceptionRequest, Feedback, Health, Policy, Report, Session, UserRisk } from './types'
 
 let adminToken = ''
 
@@ -37,8 +37,9 @@ export const getAudits = (limit = 500) => api<Audit[]>(`/v1/admin/audits?limit=$
 export const getPolicies = () => api<Policy[]>('/v1/admin/policies')
 export const getUsers = () => api<UserRisk[]>('/v1/admin/users')
 export const getExceptions = () => api<ExceptionRequest[]>('/v1/admin/exceptions')
+export const getFeedback = () => api<Feedback[]>('/v1/admin/feedback')
 export const getReport = (days: number) => api<Report>(`/v1/admin/report?days=${days}`)
-export const getEvents = () => api<Record<string, unknown>[]>('/v1/admin/events')
+export const getEvents = () => api<AdminEvent[]>('/v1/admin/events')
 
 export async function clientJSON<T>(path: string, token: string): Promise<T> {
   const response = await fetch(path, { headers: { Authorization: 'Bearer ' + token }, credentials: 'same-origin' })
@@ -55,4 +56,3 @@ export async function inspectFile(token: string, destination: string, mode: 'che
 }
 
 export type { DestinationInfo }
-

@@ -36,7 +36,7 @@ Go Gateway (:18080)
 | 内容解析 | Go 直接处理 UTF-8 文本、代码、CSV、JSON；可选 Python Worker 处理文字型 PDF（最多 30 页）、DOCX 和 PNG/JPEG OCR。解析失败、空白、超限和不支持格式均进入 `review`。 |
 | 风险决策 | 私钥、AWS Access Key、身份证号/手机号候选特征；动态字面关键词策略；离职/重点人员状态；可选本地 Ollama。模型只可提高审查强度。 |
 | 运营闭环 | PostgreSQL 自动迁移；内容判定与传输结果分开留痕；审计、事件处置、策略、人员、临时例外、误报反馈和完整 1–90 天统计。数据库状态读取失败时上传失败关闭。 |
-| 运营台与身份 | React + TypeScript + Ant Design + TanStack Query + ECharts；OIDC 授权码 + PKCE；`viewer`、`operator`、`admin` 三档 Casbin RBAC；静态管理员密钥仅作本地兼容。 |
+| 运营台与身份 | React + TypeScript + Ant Design + TanStack Query + ECharts；态势总览展示活跃风险、处置率、误报率、MTTR、扫描覆盖与高风险身份；事件工作台提供密集筛选、可定制列、证据时间线、同身份活动和持久化确报/误报处置；OIDC 授权码 + PKCE；`viewer`、`operator`、`admin` 三档 Casbin RBAC；静态管理员密钥仅作本地兼容。 |
 | 受控转发 | 只有调用 `/v1/forward/...`、判定为 `allow` 且目标预先配置时才转发；下游支持间接环境变量 Bearer 和 mTLS，禁止任意 URL与重定向。 |
 | 探针 | `/health` 报告存储、OIDC、mTLS、Analyzer 和模型模式；`/ready` 同时检查数据库和已配置 Analyzer。 |
 
@@ -108,7 +108,7 @@ Compose 启动 Go Gateway、Python Analyzer 和 PostgreSQL。网关只映射到 
 
 1. 业务集成以对应身份密钥调用 `POST /v1/check/{destination}` 或 `POST /v1/forward/{destination}`，multipart 字段名为 `file`。
 2. 返回 `allow`、`review` 或 `block`，以及原因代码、SHA-256、审计 ID 和独立的 `transfer_status`。`review` 与 `block` 永不转发；显式转发会区分 `pending`、`not_configured`、`failed` 和 `forwarded`。
-3. 管理员通过 `/v1/admin/...` 管理策略、人员状态、例外、反馈、审计和报告。
+3. 管理员通过 `/v1/admin/...` 管理策略、人员状态、例外、反馈、审计和报告；`GET /v1/admin/feedback` 为事件处置状态、处置率、误报率和 MTTR 提供持久化数据。
 4. 对可配置策略命中的审计，客户端可向 `POST /v1/exceptions` 提交 `audit_id` 和理由；批准只对同一身份、目标和完全相同的文件字节有效，且不能绕过秘密、人员、个人信息或模型故障规则。
 5. 误报反馈只生成策略优化候选，不自动修改策略。
 
@@ -187,7 +187,7 @@ The primary path is split by responsibility: `cmd/dlp-gateway` owns process life
 | Extraction | Go handles UTF-8 text, code, CSV, and JSON directly. The optional Python worker handles text-based PDF (up to 30 pages), DOCX, and PNG/JPEG OCR. Parse failures, blank input, over-limit input, and unsupported formats require `review`. |
 | Decision | Private-key, AWS key, ID/phone candidate signals; dynamic literal policies; departing/privileged personnel state; optional local Ollama. Model output may escalate only. |
 | Operations | Automatic PostgreSQL migrations; separate content and transfer outcomes; audit, incident triage, policies, people risk, scoped exceptions, feedback, and full-window 1–90-day reports. Policy-state read failures fail closed. |
-| Console and identity | React + TypeScript + Ant Design + TanStack Query + ECharts; OIDC authorization code + PKCE; Casbin `viewer`, `operator`, and `admin` roles; a static admin key remains only for local compatibility. |
+| Console and identity | React + TypeScript + Ant Design + TanStack Query + ECharts. The posture dashboard covers active risk, remediation rate, false-positive rate, MTTR, inspection coverage, and risky identities. The incident workbench adds dense filtering, configurable columns, an evidence timeline, same-identity activity, and persisted true/false-positive disposition. OIDC uses authorization code + PKCE; Casbin supplies `viewer`, `operator`, and `admin` roles; a static admin key remains only for local compatibility. |
 | Controlled forwarding | `/v1/forward/...` requires `allow` and a preconfigured target. Connectors support indirect environment-variable Bearer credentials and mTLS. Arbitrary URLs and redirects are rejected. |
 | Probes | `/health` reports storage, OIDC, mTLS, Analyzer, and model modes. `/ready` checks the database and the configured Analyzer. |
 
@@ -259,7 +259,7 @@ Compose starts the Go Gateway, Python Analyzer, and PostgreSQL. The gateway bind
 
 1. A business integration authenticates with its actor key and calls `POST /v1/check/{destination}` or `POST /v1/forward/{destination}` using multipart field `file`.
 2. The result is `allow`, `review`, or `block` with reason codes, SHA-256, an audit ID, and a separate `transfer_status`. `review` and `block` never forward. Explicit forwarding distinguishes `pending`, `not_configured`, `failed`, and `forwarded`.
-3. Administrators use `/v1/admin/...` to manage policies, personnel state, exceptions, feedback, audits, and reports.
+3. Administrators use `/v1/admin/...` to manage policies, personnel state, exceptions, feedback, audits, and reports. `GET /v1/admin/feedback` provides durable inputs for incident status, remediation rate, false-positive rate, and MTTR.
 4. For a configurable policy hit, a client may submit `audit_id` and a justification to `POST /v1/exceptions`. Approval is restricted to the same actor, destination, and exact file bytes; it cannot bypass secret, personnel, personal-data, or model-outage guards.
 5. False-positive feedback creates policy-tuning candidates but never mutates policy automatically.
 
