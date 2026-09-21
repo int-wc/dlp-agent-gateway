@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { Alert, Avatar, Badge, Button, ConfigProvider, Dropdown, Layout, Menu, Spin, Typography, theme } from 'antd'
+import type { MenuProps } from 'antd'
 import {
   ApiOutlined, AuditOutlined, BarChartOutlined, BellOutlined, DashboardOutlined, ExperimentOutlined,
   FileProtectOutlined, LogoutOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SafetyCertificateOutlined,
@@ -22,19 +23,35 @@ const Settings = lazy(() => import('./pages/Settings').then(module => ({ default
 
 const { Header, Sider, Content } = Layout
 
-const navigation = [
-  { key: 'dashboard', icon: <DashboardOutlined />, label: '态势总览' },
-  { key: 'incidents', icon: <BellOutlined />, label: '事件中心' },
-  { key: 'audits', icon: <AuditOutlined />, label: '审计日志' },
-  { type: 'divider' as const },
-  { key: 'policies', icon: <FileProtectOutlined />, label: '策略管理' },
-  { key: 'exceptions', icon: <SafetyCertificateOutlined />, label: '例外与审批' },
-  { key: 'people', icon: <TeamOutlined />, label: '人员风险' },
-  { type: 'divider' as const },
-  { key: 'integrations', icon: <ApiOutlined />, label: '集成与测试' },
-  { key: 'reports', icon: <BarChartOutlined />, label: '运营报告' },
-  { key: 'settings', icon: <SettingOutlined />, label: '系统设置' },
+const navigation: MenuProps['items'] = [
+  { type: 'group', label: '监测与响应', children: [
+    { key: 'dashboard', icon: <DashboardOutlined />, label: '态势总览' },
+    { key: 'incidents', icon: <BellOutlined />, label: '事件中心' },
+    { key: 'audits', icon: <AuditOutlined />, label: '审计日志' },
+  ] },
+  { type: 'group', label: '策略与身份', children: [
+    { key: 'policies', icon: <FileProtectOutlined />, label: '策略管理' },
+    { key: 'exceptions', icon: <SafetyCertificateOutlined />, label: '例外与审批' },
+    { key: 'people', icon: <TeamOutlined />, label: '人员风险' },
+  ] },
+  { type: 'group', label: '平台运营', children: [
+    { key: 'integrations', icon: <ApiOutlined />, label: '集成与测试' },
+    { key: 'reports', icon: <BarChartOutlined />, label: '运营报告' },
+    { key: 'settings', icon: <SettingOutlined />, label: '系统设置' },
+  ] },
 ]
+
+const pageMeta: Record<string, { title: string; context: string }> = {
+  dashboard: { title: '风险态势总览', context: 'Security posture' },
+  incidents: { title: '事件中心', context: 'Investigation workspace' },
+  audits: { title: '审计日志', context: 'Evidence ledger' },
+  policies: { title: '策略管理', context: 'Policy control' },
+  exceptions: { title: '例外与审批', context: 'Time-bound access' },
+  people: { title: '人员风险', context: 'Identity risk' },
+  integrations: { title: '集成与测试实验室', context: 'Business entry' },
+  reports: { title: '运营报告', context: 'Risk analytics' },
+  settings: { title: '系统设置', context: 'Trust configuration' },
+}
 
 export default function App() {
   const [page, setPage] = useState(() => location.hash.slice(1) || 'dashboard')
@@ -82,6 +99,7 @@ export default function App() {
   if (!session?.authenticated) return <Login session={session ?? { authenticated: false, mode: 'static' }} onStaticLogin={authenticate} />
 
   const displayName = session.identity?.name || session.identity?.email || session.identity?.subject || '管理员'
+  const currentPage = pageMeta[page] ?? pageMeta.dashboard
   return <Layout className="app-shell">
     <Sider width={246} collapsedWidth={76} collapsed={collapsed} className="app-sider" trigger={null}>
       <div className="brand"><div className="brand-mark"><SafetyCertificateOutlined /></div>{!collapsed && <div><strong>Sentinel Gate</strong><span>DLP Operations</span></div>}</div>
@@ -90,9 +108,11 @@ export default function App() {
     </Sider>
     <Layout>
       <Header className="app-header">
-        <Button type="text" icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />} onClick={() => setCollapsed(value => !value)} />
+        <Button className="header-toggle" type="text" icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />} onClick={() => setCollapsed(value => !value)} aria-label={collapsed ? '展开导航' : '收起导航'} />
+        <div className="header-context"><span>{currentPage.context}</span><strong>{currentPage.title}</strong></div>
         <div className="header-spacer" />
-        <Badge status={health.data?.status === 'ok' ? 'success' : 'error'} text={health.data?.status === 'ok' ? '网关正常' : '网关异常'} />
+        <div className="header-environment"><span className="environment-dot" /><div><strong>本地演示环境</strong><small>仅处理合成数据</small></div></div>
+        <div className="header-status"><Badge status={health.data?.status === 'ok' ? 'success' : 'error'} /><span>{health.data?.status === 'ok' ? '网关正常' : '网关异常'}</span></div>
         <Dropdown menu={{ items: [{ key: 'logout', icon: <LogoutOutlined />, label: '退出登录', onClick: logout }] }} placement="bottomRight">
           <Button type="text" className="user-button"><Avatar size="small" icon={<UserOutlined />} /><span>{displayName}</span><Typography.Text type="secondary">{role}</Typography.Text></Button>
         </Dropdown>
