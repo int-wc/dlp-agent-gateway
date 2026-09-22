@@ -201,7 +201,7 @@ func TestGoGatewayHealthAndFailClosedDecisions(t *testing.T) {
 		t.Fatal(err)
 	}
 	health := bodyJSON(t, resp)
-	if health["status"] != "ok" || health["version"] != "0.6.0" {
+	if health["status"] != "ok" || health["version"] != "0.7.0" {
 		t.Fatalf("health=%v", health)
 	}
 	resp, err = http.Get(srv.URL + "/ready")
@@ -318,6 +318,36 @@ func TestGoGatewayPolicyAndAdmin(t *testing.T) {
 	result := bodyJSON(t, upload(t, srv.URL, "/v1/check/external", "canary.txt", []byte("project canary"), clientKey))
 	if result["action"] != "block" {
 		t.Fatalf("policy decision=%v", result)
+	}
+}
+
+func TestAuditQueryPaginationFiltersAndCSVExport(t *testing.T) {
+	srv := newTestServer(t)
+	bodyJSON(t, upload(t, srv.URL, "/v1/check/external", "synthetic-safe.txt", []byte("public synthetic note"), clientKey))
+	bodyJSON(t, upload(t, srv.URL, "/v1/check/external", "synthetic-review-match.txt", []byte("Call 13800138000"), clientKey))
+	bodyJSON(t, upload(t, srv.URL, "/v1/check/external", "=synthetic-formula.txt", []byte("public synthetic export"), clientKey))
+
+	response := adminRequest(t, http.MethodGet, srv.URL+"/v1/admin/audits/query?page=1&page_size=1&action=review&q=review-match&window=7d", nil)
+	page := bodyJSON(t, response)
+	items, ok := page["items"].([]any)
+	if !ok || page["total"] != float64(1) || len(items) != 1 {
+		t.Fatalf("audit page=%v", page)
+	}
+
+	response = adminRequest(t, http.MethodGet, srv.URL+"/v1/admin/audits/query?window=invalid", nil)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid filters status=%d", response.StatusCode)
+	}
+	response.Body.Close()
+
+	response = adminRequest(t, http.MethodGet, srv.URL+"/v1/admin/audits/export?window=all", nil)
+	if response.StatusCode != http.StatusOK || !strings.HasPrefix(response.Header.Get("Content-Type"), "text/csv") {
+		t.Fatalf("export status=%d content-type=%q", response.StatusCode, response.Header.Get("Content-Type"))
+	}
+	raw, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil || !bytes.Contains(raw, []byte("'=synthetic-formula.txt")) {
+		t.Fatalf("export body=%q err=%v", raw, err)
 	}
 }
 

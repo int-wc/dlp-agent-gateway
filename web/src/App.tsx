@@ -10,6 +10,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getHealth, getSession, setAdminToken, api } from './lib/api'
 import type { Session } from './lib/types'
 import { Login } from './pages/Login'
+import { BrandMark } from './components/BrandMark'
 
 const Overview = lazy(() => import('./pages/Overview').then(module => ({ default: module.Overview })))
 const Incidents = lazy(() => import('./pages/Incidents').then(module => ({ default: module.Incidents })))
@@ -40,6 +41,18 @@ const navigation: MenuProps['items'] = [
     { key: 'settings', icon: <SettingOutlined />, label: '系统设置' },
   ] },
 ]
+
+const pageContext: Record<string, { section: string; title: string }> = {
+  dashboard: { section: '监测与响应', title: '态势总览' },
+  incidents: { section: '监测与响应', title: '事件中心' },
+  audits: { section: '监测与响应', title: '审计日志' },
+  policies: { section: '策略与身份', title: '策略管理' },
+  exceptions: { section: '策略与身份', title: '例外与审批' },
+  people: { section: '策略与身份', title: '人员风险' },
+  integrations: { section: '平台运营', title: '集成与测试' },
+  reports: { section: '平台运营', title: '运营报告' },
+  settings: { section: '平台运营', title: '系统设置' },
+}
 
 export default function App() {
   const [page, setPage] = useState(() => location.hash.slice(1) || 'dashboard')
@@ -87,17 +100,19 @@ export default function App() {
   if (!session?.authenticated) return <Login session={session ?? { authenticated: false, mode: 'static' }} onStaticLogin={authenticate} />
 
   const displayName = session.identity?.name || session.identity?.email || session.identity?.subject || '管理员'
+  const currentPage = pageContext[page] ?? pageContext.dashboard
   return <Layout className="app-shell">
     <Sider width={246} collapsedWidth={76} collapsed={collapsed} className="app-sider" trigger={null}>
-      <div className="brand"><div className="brand-mark"><SafetyCertificateOutlined /></div>{!collapsed && <div><strong>Sentinel Gate</strong><span>DLP Operations</span></div>}</div>
+      <div className="brand"><BrandMark />{!collapsed && <div><strong>Sentinel Gate</strong><span>DLP Operations</span></div>}</div>
       <Menu mode="inline" theme="dark" selectedKeys={[page]} items={navigation} onClick={({ key }) => go(key)} className="app-menu" />
       {!collapsed && <div className="sider-foot"><ExperimentOutlined /><span>Reference build · v{health.data?.version ?? '0.4'}</span></div>}
     </Sider>
     <Layout>
       <Header className="app-header">
         <Button className="header-toggle" type="text" icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />} onClick={() => setCollapsed(value => !value)} aria-label={collapsed ? '展开导航' : '收起导航'} />
+        <div className="header-context"><span>{currentPage.section}</span><strong>{currentPage.title}</strong></div>
         <div className="header-spacer" />
-        <div className="header-status"><Badge status={health.data?.status === 'ok' ? 'success' : 'error'} /><span>{health.data?.status === 'ok' ? '本地演示 · 正常' : '网关异常'}</span></div>
+        <div className="header-environment"><Badge status={health.data?.status === 'ok' ? 'success' : 'error'} /><div><strong>本地演示</strong><small>{health.data?.status === 'ok' ? `运行正常 · v${health.data?.version ?? '—'}` : '网关异常'}</small></div></div>
         <Dropdown menu={{ items: [{ key: 'logout', icon: <LogoutOutlined />, label: '退出登录', onClick: logout }] }} placement="bottomRight">
           <Button type="text" className="user-button"><Avatar size="small" icon={<UserOutlined />} /><span>{displayName}</span><Typography.Text type="secondary">{role}</Typography.Text></Button>
         </Dropdown>
@@ -108,5 +123,5 @@ export default function App() {
 }
 
 export function ThemedApp() {
-  return <ConfigProvider theme={{ algorithm: theme.defaultAlgorithm, token: { colorPrimary: '#2869d8', colorInfo: '#2869d8', borderRadius: 6, colorBgLayout: '#f5f6f8', fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', boxShadow: 'none', boxShadowSecondary: 'none' }, components: { Layout: { headerBg: '#fff', siderBg: '#111827' }, Menu: { darkItemBg: '#111827', darkItemSelectedBg: '#233553', darkItemHoverBg: '#1b293d' }, Card: { headerFontSize: 14 } } }}><App /></ConfigProvider>
+  return <ConfigProvider theme={{ algorithm: theme.defaultAlgorithm, token: { colorPrimary: '#2f6fd2', colorInfo: '#2f6fd2', colorSuccess: '#238763', colorWarning: '#b77924', colorError: '#c84d52', borderRadius: 7, controlHeight: 36, fontSize: 13, colorBgLayout: '#f4f6f9', colorBorder: '#dfe4ea', fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif', boxShadow: 'none', boxShadowSecondary: 'none' }, components: { Layout: { headerBg: '#fff', siderBg: '#111827' }, Menu: { darkItemBg: '#111827', darkItemSelectedBg: '#243652', darkItemHoverBg: '#1b293d', itemBorderRadius: 6 }, Card: { headerFontSize: 14 }, Table: { headerBg: '#f7f8fa', headerColor: '#667085', rowHoverBg: '#f7f9fc' } } }}><App /></ConfigProvider>
 }

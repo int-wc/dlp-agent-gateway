@@ -45,6 +45,11 @@ func TestPostgresRepositoryWorkflow(t *testing.T) {
 	if err != nil || audit.TransferStatus != "not_requested" {
 		t.Fatalf("audit=%v err=%v", audit, err)
 	}
+	since := time.Now().Add(-time.Hour)
+	page, err := repository.QueryAudits(AuditQuery{Limit: 20, Action: "review", Search: "synthetic", Since: &since})
+	if err != nil || page.Total != 1 || len(page.Items) != 1 || page.Items[0].ID != auditID {
+		t.Fatalf("audit page=%v err=%v", page, err)
+	}
 	exceptionID, err := repository.CreateException(audit, "synthetic-user", "synthetic business requirement")
 	if err != nil || exceptionID != 1 {
 		t.Fatalf("exception id=%d err=%v", exceptionID, err)

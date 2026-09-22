@@ -1,9 +1,11 @@
 import { useQuery } from '@tanstack/react-query'
-import { getAudits, getEvents, getExceptions, getFeedback, getIncidents, getPolicies, getReport, getUsers } from '../lib/api'
+import { getAuditPage, getAudits, getEvents, getExceptions, getFeedback, getIncidents, getPolicies, getReport, getUsers } from '../lib/api'
+import type { AuditQuery } from '../lib/types'
 
 export const operationsKeys = {
   all: ['operations'] as const,
   audits: ['operations', 'audits'] as const,
+  auditPage: (query: AuditQuery) => ['operations', 'audits', 'page', query] as const,
   policies: ['operations', 'policies'] as const,
   users: ['operations', 'users'] as const,
   exceptions: ['operations', 'exceptions'] as const,
@@ -16,6 +18,9 @@ export const operationsKeys = {
 
 export function useAudits(enabled = true) {
   return useQuery({ queryKey: operationsKeys.audits, queryFn: () => getAudits(500), enabled })
+}
+export function useAuditPage(query: AuditQuery) {
+  return useQuery({ queryKey: operationsKeys.auditPage(query), queryFn: () => getAuditPage(query), placeholderData: previous => previous })
 }
 export function usePolicies(enabled = true) {
   return useQuery({ queryKey: operationsKeys.policies, queryFn: getPolicies, enabled })

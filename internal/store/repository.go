@@ -21,6 +21,7 @@ type Repository interface {
 	InsertAudit(Audit) (int64, error)
 	MarkDelivery(id int64, upstreamStatus *int, forwarded bool, transferStatus string) error
 	Audits(limit int) ([]Audit, error)
+	QueryAudits(AuditQuery) (AuditPage, error)
 	AuditsSince(time.Time) ([]Audit, error)
 	AuditByID(int64) (Audit, error)
 	AuditForActor(id int64, actor string) (Audit, error)

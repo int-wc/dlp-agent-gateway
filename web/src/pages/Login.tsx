@@ -5,6 +5,7 @@ import {
   LockOutlined, SafetyCertificateOutlined, SafetyOutlined, UserOutlined,
 } from '@ant-design/icons'
 import type { Session } from '../lib/types'
+import { BrandMark } from '../components/BrandMark'
 
 type LoginValues = {
   account: string
@@ -55,7 +56,7 @@ export function Login({ session, onStaticLogin }: {
       <div className="visual-glow visual-glow-one" />
       <div className="visual-glow visual-glow-two" />
       <div className="login-brand">
-        <div className="brand-mark large"><SafetyCertificateOutlined /></div>
+        <BrandMark large />
         <div><strong>Sentinel Gate</strong><span>DLP Operations Platform</span></div>
       </div>
       <div className="login-copy">
@@ -73,7 +74,7 @@ export function Login({ session, onStaticLogin }: {
 
     <section className="login-panel">
       <div className="login-card">
-        <div className="login-mobile-brand"><div className="brand-mark"><SafetyCertificateOutlined /></div><strong>Sentinel Gate</strong></div>
+        <div className="login-mobile-brand"><BrandMark /><strong>Sentinel Gate</strong></div>
         <div className="login-kicker">安全运营控制台</div>
         <h2>欢迎回来</h2>
         <p className="login-subtitle">登录后查看风险事件、策略执行与审计证据。</p>

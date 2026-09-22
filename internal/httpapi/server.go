@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -73,6 +74,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/forward/{destination}", s.forward)
 	s.mux.HandleFunc("POST /v1/exceptions", s.requestException)
 	s.mux.HandleFunc("GET /v1/admin/audits", s.adminAudits)
+	s.mux.HandleFunc("GET /v1/admin/audits/query", s.queryAudits)
+	s.mux.HandleFunc("GET /v1/admin/audits/export", s.exportAudits)
 	s.mux.HandleFunc("GET /v1/admin/policies", s.adminPolicies)
 	s.mux.HandleFunc("POST /v1/admin/policies", s.addPolicy)
 	s.mux.HandleFunc("PUT /v1/admin/policies/{id}", s.updatePolicy)
@@ -92,7 +95,7 @@ func (s *Server) routes() {
 }
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
-		"status": "ok", "version": "0.6.0", "analyzer_enabled": s.cfg.AnalyzerURL != "", "model_enabled": s.cfg.OllamaModel != "",
+		"status": "ok", "version": "0.7.0", "analyzer_enabled": s.cfg.AnalyzerURL != "", "model_enabled": s.cfg.OllamaModel != "",
 		"storage": s.cfg.StorageBackend(), "oidc_enabled": s.cfg.OIDCEnabled(), "mtls_required": s.cfg.RequireMTLS,
 	})
 }
@@ -319,6 +322,93 @@ func (s *Server) adminAudits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, items)
+}
+func (s *Server) queryAudits(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOK(w, r) {
+		return
+	}
+	page := queryInt(r, "page", 1)
+	pageSize := queryInt(r, "page_size", 20)
+	if page < 1 || page > 1_000_000 || pageSize < 1 || pageSize > 100 {
+		writeError(w, http.StatusBadRequest, "invalid_pagination")
+		return
+	}
+	query, ok := auditFilters(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_audit_filters")
+		return
+	}
+	query.Limit = pageSize
+	query.Offset = (page - 1) * pageSize
+	result, err := s.store.QueryAudits(query)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "query_failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+func (s *Server) exportAudits(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOK(w, r) {
+		return
+	}
+	query, ok := auditFilters(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_audit_filters")
+		return
+	}
+	query.Limit = 5000
+	result, err := s.store.QueryAudits(query)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "query_failed")
+		return
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="dlp-audits.csv"`)
+	w.Header().Set("Cache-Control", "no-store")
+	writer := csv.NewWriter(w)
+	_ = writer.Write([]string{"id", "created_at", "action", "actor", "destination", "filename", "size_bytes", "reasons", "signals", "transfer_status"})
+	for _, item := range result.Items {
+		_ = writer.Write([]string{
+			strconv.FormatInt(item.ID, 10), item.CreatedAt, item.Action, csvSafe(item.Actor), csvSafe(item.Destination), csvSafe(item.Filename),
+			strconv.FormatInt(item.Size, 10), csvSafe(strings.Join(item.Reasons, "|")), csvSafe(strings.Join(item.Signals, "|")), item.TransferStatus,
+		})
+	}
+	writer.Flush()
+	_ = s.store.Event("audits_exported", strconv.Itoa(len(result.Items)))
+}
+
+func auditFilters(r *http.Request) (store.AuditQuery, bool) {
+	action := strings.TrimSpace(r.URL.Query().Get("action"))
+	if action != "" && action != "allow" && action != "review" && action != "block" {
+		return store.AuditQuery{}, false
+	}
+	search := strings.TrimSpace(r.URL.Query().Get("q"))
+	if len([]rune(search)) > 120 {
+		return store.AuditQuery{}, false
+	}
+	window := r.URL.Query().Get("window")
+	if window == "" {
+		window = "all"
+	}
+	var since *time.Time
+	durations := map[string]time.Duration{"24h": 24 * time.Hour, "7d": 7 * 24 * time.Hour, "30d": 30 * 24 * time.Hour, "90d": 90 * 24 * time.Hour}
+	if window != "all" {
+		duration, exists := durations[window]
+		if !exists {
+			return store.AuditQuery{}, false
+		}
+		value := time.Now().UTC().Add(-duration)
+		since = &value
+	}
+	return store.AuditQuery{Action: action, Search: search, Since: since}, true
+}
+
+func csvSafe(value string) string {
+	trimmed := strings.TrimLeft(value, " \t\r\n")
+	if trimmed != "" && strings.ContainsRune("=+-@", rune(trimmed[0])) {
+		return "'" + value
+	}
+	return value
 }
 func (s *Server) adminPolicies(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOK(w, r) {

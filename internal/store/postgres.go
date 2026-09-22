@@ -237,6 +237,43 @@ func (p *Postgres) Audits(limit int) ([]Audit, error) {
 	return collectAudits(rows)
 }
 
+func (p *Postgres) QueryAudits(query AuditQuery) (AuditPage, error) {
+	ctx, cancel := dbContext()
+	defer cancel()
+	query = normalizeAuditQuery(query)
+	search := ""
+	if query.Search != "" {
+		search = "%" + query.Search + "%"
+	}
+	filter := `
+		FROM audits
+		WHERE ($1 = '' OR action = $1)
+		  AND ($2 = '' OR actor ILIKE $2 OR destination ILIKE $2 OR filename ILIKE $2
+		       OR array_to_string(reasons, ' ') ILIKE $2 OR array_to_string(signals, ' ') ILIKE $2)
+		  AND ($3::timestamptz IS NULL OR created_at >= $3)`
+	var total int
+	if err := p.pool.QueryRow(ctx, "SELECT count(*) "+filter, query.Action, search, query.Since).Scan(&total); err != nil {
+		return AuditPage{}, err
+	}
+	rows, err := p.pool.Query(ctx, "SELECT "+auditColumns+filter+" ORDER BY id DESC LIMIT $4 OFFSET $5", query.Action, search, query.Since, query.Limit, query.Offset)
+	if err != nil {
+		return AuditPage{}, err
+	}
+	defer rows.Close()
+	items := []Audit{}
+	for rows.Next() {
+		item, err := scanAudit(rows)
+		if err != nil {
+			return AuditPage{}, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return AuditPage{}, err
+	}
+	return AuditPage{Items: items, Total: total, Limit: query.Limit, Offset: query.Offset}, nil
+}
+
 func collectAudits(rows pgx.Rows) ([]Audit, error) {
 	result := []Audit{}
 	for rows.Next() {

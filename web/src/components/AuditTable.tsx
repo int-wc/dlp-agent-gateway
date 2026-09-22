@@ -1,9 +1,9 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Button, Descriptions, Drawer, Empty, Input, Select, Space, Table, Tag, message } from 'antd'
 import { SearchOutlined } from '@ant-design/icons'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
-import type { Action, Audit } from '../lib/types'
+import type { Action, Audit, AuditQuery } from '../lib/types'
 import { operationsKeys } from '../hooks/useOperations'
 
 export const actionMeta: Record<Action, { label: string; color: string }> = {
@@ -31,35 +31,36 @@ export const formatDateTime = (value: string, part?: 'date' | 'time') => {
   return date.toLocaleString('zh-CN', { hour12: false })
 }
 
-export function AuditTable({ audits, loading, incidentsOnly = false, canOperate = true }: { audits: Audit[]; loading: boolean; incidentsOnly?: boolean; canOperate?: boolean }) {
+export function AuditTable({ audits, total, query, onQueryChange, loading, canOperate = true }: {
+  audits: Audit[]
+  total: number
+  query: AuditQuery
+  onQueryChange: (change: Partial<AuditQuery>) => void
+  loading: boolean
+  canOperate?: boolean
+}) {
   const [selected, setSelected] = useState<Audit | null>(null)
-  const [search, setSearch] = useState('')
-  const [action, setAction] = useState<Action | 'all'>('all')
+  const [searchDraft, setSearchDraft] = useState(query.search)
   const queryClient = useQueryClient()
+  useEffect(() => setSearchDraft(query.search), [query.search])
   const feedback = useMutation({
     mutationFn: (id: number) => api(`/v1/admin/audits/${id}/feedback`, { method: 'PUT', body: JSON.stringify({ verdict: 'false_positive', note: '运营台人工反馈' }) }),
     onSuccess: () => { message.success('已记录误报反馈'); queryClient.invalidateQueries({ queryKey: operationsKeys.all }) },
     onError: (error: Error) => message.error(error.message),
   })
-  const data = useMemo(() => audits.filter(item => {
-    if (incidentsOnly && item.action === 'allow') return false
-    if (action !== 'all' && item.action !== action) return false
-    const text = [item.actor, item.destination, item.filename, ...item.reasons].join(' ').toLowerCase()
-    return text.includes(search.toLowerCase())
-  }), [audits, search, action, incidentsOnly])
-
   return <>
     <div className="table-toolbar">
-      <Input allowClear prefix={<SearchOutlined />} placeholder="搜索身份、目标、文件或命中原因" value={search} onChange={event => setSearch(event.target.value)} />
-      <Select value={action} onChange={setAction} options={[{ value: 'all', label: '全部判定' }, { value: 'review', label: '待复核' }, { value: 'block', label: '已阻断' }, { value: 'allow', label: '允许' }]} />
+      <Input.Search allowClear prefix={<SearchOutlined />} placeholder="搜索身份、目标、文件、原因或信号" value={searchDraft} onChange={event => setSearchDraft(event.target.value)} onSearch={value => onQueryChange({ search: value.trim(), page: 1 })} enterButton="搜索" />
+      <Select value={query.action} onChange={action => onQueryChange({ action, page: 1 })} options={[{ value: 'all', label: '全部判定' }, { value: 'review', label: '待复核' }, { value: 'block', label: '已阻断' }, { value: 'allow', label: '允许' }]} />
+      <Select value={query.window} onChange={window => onQueryChange({ window, page: 1 })} options={[{ value: '24h', label: '近 24 小时' }, { value: '7d', label: '近 7 天' }, { value: '30d', label: '近 30 天' }, { value: '90d', label: '近 90 天' }, { value: 'all', label: '全部时间' }]} />
     </div>
-    <Table<Audit> rowKey="id" loading={loading} dataSource={data} pagination={{ pageSize: 12, showSizeChanger: false, showTotal: total => `共 ${total} 条` }} scroll={{ x: 980 }} locale={{ emptyText: <Empty description="暂无符合条件的审计事件" /> }} onRow={record => ({ onClick: () => setSelected(record) })} columns={[
-      { title: '风险', dataIndex: 'action', width: 100, render: (value: Action) => <Tag color={actionMeta[value].color}>{actionMeta[value].label}</Tag> },
-      { title: '时间', dataIndex: 'created_at', width: 176, render: value => formatDateTime(value) },
-      { title: '身份与目标', width: 190, render: (_, item) => <div><strong>{item.actor}</strong><div className="cell-sub">→ {item.destination}</div></div> },
-      { title: '文件', dataIndex: 'filename', ellipsis: true, render: (value, item) => <div><span>{value}</span><div className="cell-sub">{formatBytes(item.size)}</div></div> },
-      { title: '命中原因', dataIndex: 'reasons', render: (values: string[]) => <Space size={[4, 4]} wrap>{values.length ? values.map(value => <Tag key={value}>{reasonLabel(value)}</Tag>) : <span className="muted">无命中</span>}</Space> },
-      { title: '传输', dataIndex: 'transfer_status', width: 110, render: value => <span className={`transfer transfer-${value}`}>{transferLabels[value] ?? value}</span> },
+    <Table<Audit> className="audit-table" rowKey="id" loading={loading} dataSource={audits} pagination={{ current: query.page, pageSize: query.pageSize, total, showSizeChanger: true, pageSizeOptions: [20, 50, 100], showTotal: count => `共 ${count} 条`, onChange: (page, pageSize) => onQueryChange({ page, pageSize }) }} scroll={{ x: 860 }} locale={{ emptyText: <Empty description="暂无符合条件的审计事件" /> }} onRow={record => ({ onClick: () => setSelected(record) })} columns={[
+      { title: '风险', dataIndex: 'action', width: 86, render: (value: Action) => <Tag color={actionMeta[value].color}>{actionMeta[value].label}</Tag> },
+      { title: '时间', dataIndex: 'created_at', width: 154, render: value => formatDateTime(value) },
+      { title: '身份与目标', width: 160, render: (_, item) => <div><strong>{item.actor}</strong><div className="cell-sub">→ {item.destination}</div></div> },
+      { title: '文件', dataIndex: 'filename', width: 150, ellipsis: true, render: (value, item) => <div><span>{value}</span><div className="cell-sub">{formatBytes(item.size)}</div></div> },
+      { title: '命中原因', dataIndex: 'reasons', width: 210, render: (values: string[]) => <Space size={[4, 4]} wrap>{values.length ? values.map(value => <Tag key={value}>{reasonLabel(value)}</Tag>) : <span className="muted">无命中</span>}</Space> },
+      { title: '传输', dataIndex: 'transfer_status', width: 100, render: value => <span className={`transfer transfer-${value}`}>{transferLabels[value] ?? value}</span> },
     ]} />
     <Drawer width={520} title={selected ? `事件 #${selected.id}` : '事件详情'} open={!!selected} onClose={() => setSelected(null)} extra={selected && selected.action !== 'allow' && canOperate ? <Button onClick={() => feedback.mutate(selected.id)} loading={feedback.isPending}>标记误报</Button> : null}>
       {selected && <>

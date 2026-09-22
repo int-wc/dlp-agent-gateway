@@ -1,4 +1,4 @@
-import type { AdminEvent, Audit, DestinationInfo, ExceptionRequest, Feedback, Health, Incident, IncidentNote, Policy, Report, Session, UserRisk } from './types'
+import type { AdminEvent, Audit, AuditPage, AuditQuery, DestinationInfo, ExceptionRequest, Feedback, Health, Incident, IncidentNote, Policy, Report, Session, UserRisk } from './types'
 
 let adminToken = ''
 
@@ -34,6 +34,24 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
 export const getHealth = () => api<Health>('/health')
 export const getSession = () => api<Session>('/v1/auth/session')
 export const getAudits = (limit = 500) => api<Audit[]>(`/v1/admin/audits?limit=${limit}`)
+function auditQueryString(query: AuditQuery) {
+  const params = new URLSearchParams({ page: String(query.page), page_size: String(query.pageSize), window: query.window })
+  if (query.action !== 'all') params.set('action', query.action)
+  if (query.search.trim()) params.set('q', query.search.trim())
+  return params.toString()
+}
+export const getAuditPage = (query: AuditQuery) => api<AuditPage>(`/v1/admin/audits/query?${auditQueryString(query)}`)
+export async function downloadAuditCSV(query: AuditQuery) {
+  const response = await fetch(`/v1/admin/audits/export?${auditQueryString(query)}`, { headers: adminToken ? { Authorization: 'Bearer ' + adminToken } : {}, credentials: 'same-origin' })
+  if (!response.ok) return parseResponse<never>(response)
+  const blob = await response.blob()
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = `dlp-audits-${new Date().toISOString().slice(0, 10)}.csv`
+  anchor.click()
+  URL.revokeObjectURL(url)
+}
 export const getPolicies = () => api<Policy[]>('/v1/admin/policies')
 export const getUsers = () => api<UserRisk[]>('/v1/admin/users')
 export const getExceptions = () => api<ExceptionRequest[]>('/v1/admin/exceptions')

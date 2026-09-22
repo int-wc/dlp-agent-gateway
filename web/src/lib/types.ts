@@ -17,6 +17,21 @@ export interface Audit {
   upstream_status?: number
 }
 
+export interface AuditQuery {
+  page: number
+  pageSize: number
+  action: Action | 'all'
+  search: string
+  window: 'all' | '24h' | '7d' | '30d' | '90d'
+}
+
+export interface AuditPage {
+  items: Audit[]
+  total: number
+  limit: number
+  offset: number
+}
+
 export interface Policy {
   id: number
   keyword: string

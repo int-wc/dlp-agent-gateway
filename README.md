@@ -35,8 +35,8 @@ Go Gateway (:18080)
 | 上传网关 | Go 标准库 HTTP 服务；Bearer 或 mTLS 业务身份；8 MiB 文件上限；服务端目标白名单；TLS、安全响应头、超时与优雅关闭。 |
 | 内容解析 | Go 直接处理 UTF-8 文本、代码、CSV、JSON；可选 Python Worker 处理文字型 PDF（最多 30 页）、DOCX 和 PNG/JPEG OCR。解析失败、空白、超限和不支持格式均进入 `review`。 |
 | 风险决策 | 私钥、AWS Access Key、身份证号/手机号候选特征；支持草稿、监控、强制三种生命周期的动态字面关键词策略；离职/重点人员状态；可选本地 Ollama。监控策略只记录命中信号，模型只可提高审查强度。 |
-| 运营闭环 | PostgreSQL 自动迁移；内容判定与传输结果分开留痕；事件负责人、调查状态、多条调查记录、处置结论、临时例外和完整 1–90 天统计。数据库状态读取失败时上传失败关闭。 |
-| 运营台与身份 | React + TypeScript + Ant Design + TanStack Query + ECharts；扁平、低装饰的运营界面；态势总览聚焦活跃风险、处置率、MTTR 与扫描覆盖；事件工作台提供筛选、证据时间线、负责人、调查状态、多条记录和确报/误报处置；OIDC 授权码 + PKCE；`viewer`、`operator`、`admin` 三档 Casbin RBAC；静态管理员密钥仅作本地兼容。 |
+| 运营闭环 | PostgreSQL 自动迁移；内容判定与传输结果分开留痕；事件负责人、调查状态、多条调查记录、处置结论、临时例外和完整 1–90 天统计；审计日志支持服务端分页、时间/判定/关键字组合筛选与 CSV 导出。数据库状态读取失败时上传失败关闭。 |
+| 运营台与身份 | React + TypeScript + Ant Design + TanStack Query + ECharts；统一的扁平、低装饰运营界面；态势总览聚焦活跃风险、处置率、MTTR 与扫描覆盖；事件工作台提供证据时间线与调查闭环；集成页明确展示 API、文档、浏览器、邮件和端点等 XDLP 通道的覆盖边界；OIDC 授权码 + PKCE；`viewer`、`operator`、`admin` 三档 Casbin RBAC；静态管理员密钥仅作本地兼容。 |
 | 受控转发 | 只有调用 `/v1/forward/...`、判定为 `allow` 且目标预先配置时才转发；下游支持间接环境变量 Bearer 和 mTLS，禁止任意 URL与重定向。 |
 | 探针 | `/health` 报告存储、OIDC、mTLS、Analyzer 和模型模式；`/ready` 同时检查数据库和已配置 Analyzer。 |
 
@@ -108,7 +108,7 @@ Compose 启动 Go Gateway、Python Analyzer 和 PostgreSQL。网关只映射到 
 
 1. 业务集成以对应身份密钥调用 `POST /v1/check/{destination}` 或 `POST /v1/forward/{destination}`，multipart 字段名为 `file`。
 2. 返回 `allow`、`review` 或 `block`，以及原因代码、SHA-256、审计 ID 和独立的 `transfer_status`。`review` 与 `block` 永不转发；显式转发会区分 `pending`、`not_configured`、`failed` 和 `forwarded`。
-3. 管理员通过 `/v1/admin/...` 管理策略、人员状态、例外、反馈、审计和报告；`GET /v1/admin/feedback` 为事件处置状态、处置率、误报率和 MTTR 提供持久化数据。
+3. 管理员通过 `/v1/admin/...` 管理策略、人员状态、例外、反馈、审计和报告；`GET /v1/admin/audits/query` 提供服务端分页和组合筛选，`GET /v1/admin/audits/export` 导出最多 5,000 条且经过公式注入防护的 CSV；`GET /v1/admin/feedback` 为事件处置状态、处置率、误报率和 MTTR 提供持久化数据。
 4. 动态策略使用 `draft`、`monitor`、`enforce` 三种模式。`monitor` 命中只写入 `policy_monitor_ID` 审计信号，不改变文件判定；`enforce` 才执行复核或阻断。
 5. 对强制策略命中的审计，客户端可向 `POST /v1/exceptions` 提交 `audit_id` 和理由；批准只对同一身份、目标和完全相同的文件字节有效，且不能绕过秘密、人员、个人信息或模型故障规则。
 6. 误报反馈只生成策略优化候选，不自动修改策略。
@@ -152,7 +152,7 @@ GitHub Actions 同时构建前端、运行 Go race 测试（包含临时 Postgre
 3. 完成 PostgreSQL 备份恢复、保留/删除、不可变导出，以及生产 PKI/OIDC 部署指南和安全基线。
 4. 使用合成或明确授权的标注样本评估模型，建立人工审批的策略优化回归闭环。
 
-MIT License。贡献内容须使用合成数据并附测试。主要依赖许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+MIT License。贡献内容须使用合成数据并附测试。控制台 favicon 改编自 MIT 许可的 Ant Design Icons `SafetyCertificateOutlined`；完整声明及其他主要依赖许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## English
 
@@ -187,8 +187,8 @@ The primary path is split by responsibility: `cmd/dlp-gateway` owns process life
 | Upload gateway | Go standard-library HTTP server; Bearer or mTLS workload identity; 8 MiB limit; destination allowlist; TLS, security headers, timeouts, and graceful shutdown. |
 | Extraction | Go handles UTF-8 text, code, CSV, and JSON directly. The optional Python worker handles text-based PDF (up to 30 pages), DOCX, and PNG/JPEG OCR. Parse failures, blank input, over-limit input, and unsupported formats require `review`. |
 | Decision | Private-key, AWS key, ID/phone candidate signals; dynamic literal policies with draft, monitor, and enforce lifecycle modes; departing/privileged personnel state; optional local Ollama. Monitor policies record signals without changing a decision, and model output may escalate only. |
-| Operations | Automatic PostgreSQL migrations; separate content and transfer outcomes; incident assignee, investigation status, multiple notes, disposition, scoped exceptions, and full-window 1–90-day reports. Policy-state read failures fail closed. |
-| Console and identity | React + TypeScript + Ant Design + TanStack Query + ECharts with a flat, low-decoration operations UI. The posture dashboard focuses on active risk, remediation rate, MTTR, and inspection coverage. The incident workbench adds filtering, evidence timeline, assignee, investigation status, multiple notes, and persisted true/false-positive disposition. OIDC uses authorization code + PKCE; Casbin supplies `viewer`, `operator`, and `admin` roles; a static admin key remains only for local compatibility. |
+| Operations | Automatic PostgreSQL migrations; separate content and transfer outcomes; incident assignee, investigation status, multiple notes, disposition, scoped exceptions, and full-window 1–90-day reports. Audit logs support server-side pagination, combined time/action/keyword filters, and CSV export. Policy-state read failures fail closed. |
+| Console and identity | React + TypeScript + Ant Design + TanStack Query + ECharts with one consistent flat, low-decoration operations UI. The posture dashboard focuses on active risk, remediation rate, MTTR, and inspection coverage; the incident workbench provides an evidence timeline and investigation loop; the integration page makes XDLP coverage boundaries explicit across API, document, browser, email, and endpoint channels. OIDC uses authorization code + PKCE; Casbin supplies `viewer`, `operator`, and `admin` roles; a static admin key remains only for local compatibility. |
 | Controlled forwarding | `/v1/forward/...` requires `allow` and a preconfigured target. Connectors support indirect environment-variable Bearer credentials and mTLS. Arbitrary URLs and redirects are rejected. |
 | Probes | `/health` reports storage, OIDC, mTLS, Analyzer, and model modes. `/ready` checks the database and the configured Analyzer. |
 
@@ -260,7 +260,7 @@ Compose starts the Go Gateway, Python Analyzer, and PostgreSQL. The gateway bind
 
 1. A business integration authenticates with its actor key and calls `POST /v1/check/{destination}` or `POST /v1/forward/{destination}` using multipart field `file`.
 2. The result is `allow`, `review`, or `block` with reason codes, SHA-256, an audit ID, and a separate `transfer_status`. `review` and `block` never forward. Explicit forwarding distinguishes `pending`, `not_configured`, `failed`, and `forwarded`.
-3. Administrators use `/v1/admin/...` to manage policies, personnel state, exceptions, feedback, audits, and reports. `GET /v1/admin/feedback` provides durable inputs for incident status, remediation rate, false-positive rate, and MTTR.
+3. Administrators use `/v1/admin/...` to manage policies, personnel state, exceptions, feedback, audits, and reports. `GET /v1/admin/audits/query` provides server-side pagination and combined filters; `GET /v1/admin/audits/export` exports up to 5,000 CSV rows with spreadsheet-formula injection protection; `GET /v1/admin/feedback` provides durable inputs for incident status, remediation rate, false-positive rate, and MTTR.
 4. Dynamic policies use `draft`, `monitor`, or `enforce`. A monitor hit writes a `policy_monitor_ID` audit signal without changing the file decision; only enforce mode applies review or block.
 5. For an enforced policy hit, a client may submit `audit_id` and a justification to `POST /v1/exceptions`. Approval is restricted to the same actor, destination, and exact file bytes; it cannot bypass secret, personnel, personal-data, or model-outage guards.
 6. False-positive feedback creates policy-tuning candidates but never mutates policy automatically.
@@ -304,4 +304,4 @@ See [SECURITY.md](SECURITY.md) for additional trust boundaries.
 3. Add PostgreSQL backup/restore, retention/deletion, immutable export, plus production PKI/OIDC deployment guidance and security baselines.
 4. Evaluate the model with synthetic or explicitly consented labeled samples and require human-approved, regression-tested policy tuning.
 
-MIT licensed. Contributions must use synthetic data and include tests. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for primary dependency licenses.
+MIT licensed. Contributions must use synthetic data and include tests. The console favicon adapts Ant Design Icons' MIT-licensed `SafetyCertificateOutlined` glyph. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the full notice and primary dependency licenses.

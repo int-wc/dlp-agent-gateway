@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -55,6 +56,19 @@ type Audit struct {
 	Forwarded      bool     `json:"forwarded"`
 	TransferStatus string   `json:"transfer_status"`
 	UpstreamStatus *int     `json:"upstream_status,omitempty"`
+}
+type AuditQuery struct {
+	Limit  int
+	Offset int
+	Action string
+	Search string
+	Since  *time.Time
+}
+type AuditPage struct {
+	Items  []Audit `json:"items"`
+	Total  int     `json:"total"`
+	Limit  int     `json:"limit"`
+	Offset int     `json:"offset"`
 }
 type Exception struct {
 	ID            int64  `json:"id"`
@@ -332,6 +346,57 @@ func (s *Store) Audits(limit int) ([]Audit, error) {
 		result[i], result[j] = result[j], result[i]
 	}
 	return result, nil
+}
+func (s *Store) QueryAudits(query AuditQuery) (AuditPage, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	query = normalizeAuditQuery(query)
+	matched := make([]Audit, 0, len(s.state.Audits))
+	for i := len(s.state.Audits) - 1; i >= 0; i-- {
+		item := s.state.Audits[i]
+		if query.Action != "" && item.Action != query.Action {
+			continue
+		}
+		if query.Since != nil {
+			created, err := time.Parse(time.RFC3339, item.CreatedAt)
+			if err != nil || created.Before(*query.Since) {
+				continue
+			}
+		}
+		if query.Search != "" {
+			haystack := strings.ToLower(strings.Join([]string{item.Actor, item.Destination, item.Filename, strings.Join(item.Reasons, " "), strings.Join(item.Signals, " ")}, " "))
+			if !strings.Contains(haystack, strings.ToLower(query.Search)) {
+				continue
+			}
+		}
+		matched = append(matched, item)
+	}
+	total := len(matched)
+	start := query.Offset
+	if start > total {
+		start = total
+	}
+	end := start + query.Limit
+	if end > total {
+		end = total
+	}
+	items := make([]Audit, end-start)
+	copy(items, matched[start:end])
+	return AuditPage{Items: items, Total: total, Limit: query.Limit, Offset: query.Offset}, nil
+}
+
+func normalizeAuditQuery(query AuditQuery) AuditQuery {
+	if query.Limit < 1 {
+		query.Limit = 20
+	}
+	if query.Limit > 5000 {
+		query.Limit = 5000
+	}
+	if query.Offset < 0 {
+		query.Offset = 0
+	}
+	query.Search = strings.TrimSpace(query.Search)
+	return query
 }
 func (s *Store) AuditsSince(since time.Time) ([]Audit, error) {
 	s.mu.RLock()
