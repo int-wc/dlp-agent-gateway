@@ -357,6 +357,66 @@ func (p *Postgres) Feedbacks() ([]Feedback, error) {
 	return result, rows.Err()
 }
 
+func (p *Postgres) Incidents() ([]Incident, error) {
+	ctx, cancel := dbContext()
+	defer cancel()
+	rows, err := p.pool.Query(ctx, "SELECT audit_id,status,assignee,updated_at FROM incidents ORDER BY updated_at DESC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []Incident{}
+	for rows.Next() {
+		var item Incident
+		var updated time.Time
+		if err := rows.Scan(&item.AuditID, &item.Status, &item.Assignee, &updated); err != nil {
+			return nil, err
+		}
+		item.UpdatedAt = updated.UTC().Format(time.RFC3339)
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (p *Postgres) UpsertIncident(auditID int64, status, assignee string) error {
+	ctx, cancel := dbContext()
+	defer cancel()
+	_, err := p.pool.Exec(ctx, `
+		INSERT INTO incidents(audit_id,status,assignee) VALUES($1,$2,$3)
+		ON CONFLICT(audit_id) DO UPDATE SET status=excluded.status,assignee=excluded.assignee,updated_at=now()
+	`, auditID, status, assignee)
+	return err
+}
+
+func (p *Postgres) IncidentNotes(auditID int64) ([]IncidentNote, error) {
+	ctx, cancel := dbContext()
+	defer cancel()
+	rows, err := p.pool.Query(ctx, "SELECT id,audit_id,author,body,created_at FROM incident_notes WHERE audit_id=$1 ORDER BY created_at DESC", auditID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []IncidentNote{}
+	for rows.Next() {
+		var item IncidentNote
+		var created time.Time
+		if err := rows.Scan(&item.ID, &item.AuditID, &item.Author, &item.Body, &created); err != nil {
+			return nil, err
+		}
+		item.CreatedAt = created.UTC().Format(time.RFC3339)
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (p *Postgres) AddIncidentNote(auditID int64, author, body string) (int64, error) {
+	ctx, cancel := dbContext()
+	defer cancel()
+	var id int64
+	err := p.pool.QueryRow(ctx, "INSERT INTO incident_notes(audit_id,author,body) VALUES($1,$2,$3) RETURNING id", auditID, author, body).Scan(&id)
+	return id, err
+}
+
 func (p *Postgres) Event(event, target string) error {
 	ctx, cancel := dbContext()
 	defer cancel()

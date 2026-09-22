@@ -1,4 +1,4 @@
-import type { AdminEvent, Audit, DestinationInfo, ExceptionRequest, Feedback, Health, Policy, Report, Session, UserRisk } from './types'
+import type { AdminEvent, Audit, DestinationInfo, ExceptionRequest, Feedback, Health, Incident, IncidentNote, Policy, Report, Session, UserRisk } from './types'
 
 let adminToken = ''
 
@@ -38,6 +38,8 @@ export const getPolicies = () => api<Policy[]>('/v1/admin/policies')
 export const getUsers = () => api<UserRisk[]>('/v1/admin/users')
 export const getExceptions = () => api<ExceptionRequest[]>('/v1/admin/exceptions')
 export const getFeedback = () => api<Feedback[]>('/v1/admin/feedback')
+export const getIncidents = () => api<Incident[]>('/v1/admin/incidents')
+export const getIncidentNotes = (auditID: number) => api<IncidentNote[]>(`/v1/admin/incidents/${auditID}/notes`)
 export const getReport = (days: number) => api<Report>(`/v1/admin/report?days=${days}`)
 export const getEvents = () => api<AdminEvent[]>('/v1/admin/events')
 

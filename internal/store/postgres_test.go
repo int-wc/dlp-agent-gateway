@@ -19,7 +19,7 @@ func TestPostgresRepositoryWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer repository.Close()
-	if _, err := repository.pool.Exec(ctx, "TRUNCATE admin_events,feedback,exceptions,audits,policies,user_statuses RESTART IDENTITY CASCADE"); err != nil {
+	if _, err := repository.pool.Exec(ctx, "TRUNCATE incident_notes,incidents,admin_events,feedback,exceptions,audits,policies,user_statuses RESTART IDENTITY CASCADE"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -55,6 +55,18 @@ func TestPostgresRepositoryWorkflow(t *testing.T) {
 	}
 	if err := repository.Feedback(auditID, "false_positive", "synthetic review"); err != nil {
 		t.Fatal(err)
+	}
+	if err := repository.UpsertIncident(auditID, "investigating", "synthetic-analyst"); err != nil {
+		t.Fatal(err)
+	}
+	if noteID, err := repository.AddIncidentNote(auditID, "synthetic-analyst", "synthetic investigation note"); err != nil || noteID != 1 {
+		t.Fatalf("note id=%d err=%v", noteID, err)
+	}
+	if incidents, err := repository.Incidents(); err != nil || len(incidents) != 1 || incidents[0].Status != "investigating" {
+		t.Fatalf("incidents=%v err=%v", incidents, err)
+	}
+	if notes, err := repository.IncidentNotes(auditID); err != nil || len(notes) != 1 || notes[0].Author != "synthetic-analyst" {
+		t.Fatalf("notes=%v err=%v", notes, err)
 	}
 	if err := repository.Event("test_event", "synthetic-target"); err != nil {
 		t.Fatal(err)

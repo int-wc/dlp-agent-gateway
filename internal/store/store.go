@@ -26,6 +26,8 @@ type state struct {
 	Audits     []Audit            `json:"audits"`
 	Exceptions []Exception        `json:"exceptions"`
 	Feedback   map[int64]Feedback `json:"feedback"`
+	Incidents  map[int64]Incident `json:"incidents"`
+	Notes      []IncidentNote     `json:"incident_notes"`
 	Events     []map[string]any   `json:"events"`
 }
 type Policy struct {
@@ -68,9 +70,22 @@ type Feedback struct {
 	Note      string `json:"note"`
 	CreatedAt string `json:"created_at"`
 }
+type Incident struct {
+	AuditID   int64  `json:"audit_id"`
+	Status    string `json:"status"`
+	Assignee  string `json:"assignee"`
+	UpdatedAt string `json:"updated_at"`
+}
+type IncidentNote struct {
+	ID        int64  `json:"id"`
+	AuditID   int64  `json:"audit_id"`
+	Author    string `json:"author"`
+	Body      string `json:"body"`
+	CreatedAt string `json:"created_at"`
+}
 
 func Open(path string) (*Store, error) {
-	s := &Store{path: path, state: state{NextIDs: map[string]int64{}, Users: map[string]string{}, Feedback: map[int64]Feedback{}}}
+	s := &Store{path: path, state: state{NextIDs: map[string]int64{}, Users: map[string]string{}, Feedback: map[int64]Feedback{}, Incidents: map[int64]Incident{}}}
 	data, err := os.ReadFile(path)
 	if err == nil {
 		if err := json.Unmarshal(data, &s.state); err != nil {
@@ -96,6 +111,12 @@ func (s *Store) normalize() {
 	}
 	if s.state.Feedback == nil {
 		s.state.Feedback = map[int64]Feedback{}
+	}
+	if s.state.Incidents == nil {
+		s.state.Incidents = map[int64]Incident{}
+	}
+	if s.state.Notes == nil {
+		s.state.Notes = []IncidentNote{}
 	}
 	if s.state.Policies == nil {
 		s.state.Policies = []Policy{}
@@ -383,6 +404,61 @@ func (s *Store) Feedbacks() ([]Feedback, error) {
 		return result[i].CreatedAt > result[j].CreatedAt
 	})
 	return result, nil
+}
+func (s *Store) Incidents() ([]Incident, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]Incident, 0, len(s.state.Incidents))
+	for _, item := range s.state.Incidents {
+		result = append(result, item)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].UpdatedAt > result[j].UpdatedAt })
+	return result, nil
+}
+func (s *Store) UpsertIncident(auditID int64, status, assignee string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	found := false
+	for _, audit := range s.state.Audits {
+		if audit.ID == auditID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return errors.New("audit not found")
+	}
+	s.state.Incidents[auditID] = Incident{AuditID: auditID, Status: status, Assignee: assignee, UpdatedAt: now()}
+	return s.persistLocked()
+}
+func (s *Store) IncidentNotes(auditID int64) ([]IncidentNote, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := []IncidentNote{}
+	for _, note := range s.state.Notes {
+		if note.AuditID == auditID {
+			result = append(result, note)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].CreatedAt > result[j].CreatedAt })
+	return result, nil
+}
+func (s *Store) AddIncidentNote(auditID int64, author, body string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	found := false
+	for _, audit := range s.state.Audits {
+		if audit.ID == auditID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return 0, errors.New("audit not found")
+	}
+	note := IncidentNote{ID: s.nextIDLocked("incident_note"), AuditID: auditID, Author: author, Body: body, CreatedAt: now()}
+	s.state.Notes = append(s.state.Notes, note)
+	return note.ID, s.persistLocked()
 }
 func (s *Store) Event(event, target string) error {
 	s.mu.Lock()

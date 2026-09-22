@@ -82,13 +82,17 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/admin/exceptions/{id}/approve", s.approveException)
 	s.mux.HandleFunc("POST /v1/admin/exceptions/{id}/reject", s.rejectException)
 	s.mux.HandleFunc("GET /v1/admin/feedback", s.adminFeedback)
+	s.mux.HandleFunc("GET /v1/admin/incidents", s.adminIncidents)
+	s.mux.HandleFunc("PUT /v1/admin/incidents/{id}", s.updateIncident)
+	s.mux.HandleFunc("GET /v1/admin/incidents/{id}/notes", s.incidentNotes)
+	s.mux.HandleFunc("POST /v1/admin/incidents/{id}/notes", s.addIncidentNote)
 	s.mux.HandleFunc("PUT /v1/admin/audits/{id}/feedback", s.feedback)
 	s.mux.HandleFunc("GET /v1/admin/report", s.report)
 	s.mux.HandleFunc("GET /v1/admin/events", s.events)
 }
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
-		"status": "ok", "version": "0.4.0", "analyzer_enabled": s.cfg.AnalyzerURL != "", "model_enabled": s.cfg.OllamaModel != "",
+		"status": "ok", "version": "0.5.0", "analyzer_enabled": s.cfg.AnalyzerURL != "", "model_enabled": s.cfg.OllamaModel != "",
 		"storage": s.cfg.StorageBackend(), "oidc_enabled": s.cfg.OIDCEnabled(), "mtls_required": s.cfg.RequireMTLS,
 	})
 }
@@ -499,6 +503,141 @@ func (s *Server) adminFeedback(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, items)
 }
+func (s *Server) adminIncidents(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOK(w, r) {
+		return
+	}
+	items, err := s.store.Incidents()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "query_failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+func (s *Server) updateIncident(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOK(w, r) {
+		return
+	}
+	id, ok := pathID(r, "id")
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_id")
+		return
+	}
+	var payload struct {
+		Status   string `json:"status"`
+		Assignee string `json:"assignee"`
+	}
+	if !decodeJSON(r, &payload) {
+		writeError(w, http.StatusBadRequest, "invalid_incident")
+		return
+	}
+	payload.Assignee = strings.TrimSpace(payload.Assignee)
+	if !validIncidentStatus(payload.Status) || len([]rune(payload.Assignee)) > 80 {
+		writeError(w, http.StatusBadRequest, "invalid_incident")
+		return
+	}
+	audit, err := s.store.AuditByID(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "audit_not_found")
+		return
+	}
+	if audit.Action == "allow" {
+		writeError(w, http.StatusConflict, "allow_event_is_not_incident")
+		return
+	}
+	if payload.Status == "resolved" {
+		feedbacks, err := s.store.Feedbacks()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "query_failed")
+			return
+		}
+		hasVerdict := false
+		for _, item := range feedbacks {
+			if item.AuditID == id {
+				hasVerdict = true
+				break
+			}
+		}
+		if !hasVerdict {
+			writeError(w, http.StatusConflict, "incident_resolution_requires_verdict")
+			return
+		}
+	}
+	if err := s.store.UpsertIncident(id, payload.Status, payload.Assignee); err != nil {
+		writeError(w, http.StatusInternalServerError, "incident_failed")
+		return
+	}
+	_ = s.store.Event("incident_updated", strconv.FormatInt(id, 10)+":"+payload.Status)
+	writeJSON(w, http.StatusOK, map[string]any{"audit_id": id, "status": payload.Status, "assignee": payload.Assignee})
+}
+func (s *Server) incidentNotes(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOK(w, r) {
+		return
+	}
+	id, ok := pathID(r, "id")
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_id")
+		return
+	}
+	audit, err := s.store.AuditByID(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "audit_not_found")
+		return
+	}
+	if audit.Action == "allow" {
+		writeError(w, http.StatusConflict, "allow_event_is_not_incident")
+		return
+	}
+	items, err := s.store.IncidentNotes(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "query_failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+func (s *Server) addIncidentNote(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOK(w, r) {
+		return
+	}
+	id, ok := pathID(r, "id")
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_id")
+		return
+	}
+	var payload struct {
+		Body string `json:"body"`
+	}
+	if !decodeJSON(r, &payload) {
+		writeError(w, http.StatusBadRequest, "invalid_note")
+		return
+	}
+	payload.Body = strings.TrimSpace(payload.Body)
+	if len([]rune(payload.Body)) < 1 || len([]rune(payload.Body)) > 500 {
+		writeError(w, http.StatusBadRequest, "invalid_note")
+		return
+	}
+	audit, err := s.store.AuditByID(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "audit_not_found")
+		return
+	}
+	if audit.Action == "allow" {
+		writeError(w, http.StatusConflict, "allow_event_is_not_incident")
+		return
+	}
+	_, subject, _ := s.adminPrincipal(r)
+	noteID, err := s.store.AddIncidentNote(id, subject, payload.Body)
+	if err != nil {
+		if _, lookupErr := s.store.AuditByID(id); lookupErr != nil {
+			writeError(w, http.StatusNotFound, "audit_not_found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "note_failed")
+		return
+	}
+	_ = s.store.Event("incident_note_added", strconv.FormatInt(id, 10))
+	writeJSON(w, http.StatusCreated, map[string]any{"id": noteID, "audit_id": id})
+}
 func (s *Server) report(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOK(w, r) {
 		return
@@ -631,13 +770,8 @@ func (s *Server) clientActor(w http.ResponseWriter, r *http.Request) (string, bo
 	return "", false
 }
 func (s *Server) adminOK(w http.ResponseWriter, r *http.Request) bool {
-	role := ""
-	if token, ok := bearer(r); ok && s.cfg.AdminKey != "" && hmac.Equal([]byte(token), []byte(s.cfg.AdminKey)) {
-		role = "admin"
-	} else if identity, ok := s.access.Identity(r); ok {
-		role = identity.Role
-	}
-	if role == "" {
+	role, _, ok := s.adminPrincipal(r)
+	if !ok {
 		writeError(w, http.StatusUnauthorized, "admin_authentication_required")
 		return false
 	}
@@ -646,6 +780,22 @@ func (s *Server) adminOK(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	return true
+}
+func (s *Server) adminPrincipal(r *http.Request) (role, subject string, ok bool) {
+	if token, present := bearer(r); present && s.cfg.AdminKey != "" && hmac.Equal([]byte(token), []byte(s.cfg.AdminKey)) {
+		return "admin", "local-admin", true
+	}
+	if identity, present := s.access.Identity(r); present {
+		subject = identity.Subject
+		if subject == "" {
+			subject = identity.Email
+		}
+		if subject == "" {
+			subject = identity.Name
+		}
+		return identity.Role, subject, true
+	}
+	return "", "", false
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
@@ -726,6 +876,9 @@ func validActionScope(action, scope string) bool {
 }
 func validStatus(value string) bool {
 	return value == "normal" || value == "privileged" || value == "departing"
+}
+func validIncidentStatus(value string) bool {
+	return value == "new" || value == "investigating" || value == "pending_business" || value == "resolved"
 }
 func safeFilename(value string) string {
 	value = filepath.Base(strings.ReplaceAll(value, "\\", "/"))

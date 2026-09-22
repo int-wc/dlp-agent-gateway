@@ -35,8 +35,8 @@ Go Gateway (:18080)
 | 上传网关 | Go 标准库 HTTP 服务；Bearer 或 mTLS 业务身份；8 MiB 文件上限；服务端目标白名单；TLS、安全响应头、超时与优雅关闭。 |
 | 内容解析 | Go 直接处理 UTF-8 文本、代码、CSV、JSON；可选 Python Worker 处理文字型 PDF（最多 30 页）、DOCX 和 PNG/JPEG OCR。解析失败、空白、超限和不支持格式均进入 `review`。 |
 | 风险决策 | 私钥、AWS Access Key、身份证号/手机号候选特征；动态字面关键词策略；离职/重点人员状态；可选本地 Ollama。模型只可提高审查强度。 |
-| 运营闭环 | PostgreSQL 自动迁移；内容判定与传输结果分开留痕；审计、事件处置、策略、人员、临时例外、误报反馈和完整 1–90 天统计。数据库状态读取失败时上传失败关闭。 |
-| 运营台与身份 | React + TypeScript + Ant Design + TanStack Query + ECharts；态势总览展示活跃风险、处置率、误报率、MTTR、扫描覆盖与高风险身份；事件工作台提供密集筛选、可定制列、证据时间线、同身份活动和持久化确报/误报处置；OIDC 授权码 + PKCE；`viewer`、`operator`、`admin` 三档 Casbin RBAC；静态管理员密钥仅作本地兼容。 |
+| 运营闭环 | PostgreSQL 自动迁移；内容判定与传输结果分开留痕；事件负责人、调查状态、多条调查记录、处置结论、临时例外和完整 1–90 天统计。数据库状态读取失败时上传失败关闭。 |
+| 运营台与身份 | React + TypeScript + Ant Design + TanStack Query + ECharts；扁平、低装饰的运营界面；态势总览聚焦活跃风险、处置率、MTTR 与扫描覆盖；事件工作台提供筛选、证据时间线、负责人、调查状态、多条记录和确报/误报处置；OIDC 授权码 + PKCE；`viewer`、`operator`、`admin` 三档 Casbin RBAC；静态管理员密钥仅作本地兼容。 |
 | 受控转发 | 只有调用 `/v1/forward/...`、判定为 `allow` 且目标预先配置时才转发；下游支持间接环境变量 Bearer 和 mTLS，禁止任意 URL与重定向。 |
 | 探针 | `/health` 报告存储、OIDC、mTLS、Analyzer 和模型模式；`/ready` 同时检查数据库和已配置 Analyzer。 |
 
@@ -186,8 +186,8 @@ The primary path is split by responsibility: `cmd/dlp-gateway` owns process life
 | Upload gateway | Go standard-library HTTP server; Bearer or mTLS workload identity; 8 MiB limit; destination allowlist; TLS, security headers, timeouts, and graceful shutdown. |
 | Extraction | Go handles UTF-8 text, code, CSV, and JSON directly. The optional Python worker handles text-based PDF (up to 30 pages), DOCX, and PNG/JPEG OCR. Parse failures, blank input, over-limit input, and unsupported formats require `review`. |
 | Decision | Private-key, AWS key, ID/phone candidate signals; dynamic literal policies; departing/privileged personnel state; optional local Ollama. Model output may escalate only. |
-| Operations | Automatic PostgreSQL migrations; separate content and transfer outcomes; audit, incident triage, policies, people risk, scoped exceptions, feedback, and full-window 1–90-day reports. Policy-state read failures fail closed. |
-| Console and identity | React + TypeScript + Ant Design + TanStack Query + ECharts. The posture dashboard covers active risk, remediation rate, false-positive rate, MTTR, inspection coverage, and risky identities. The incident workbench adds dense filtering, configurable columns, an evidence timeline, same-identity activity, and persisted true/false-positive disposition. OIDC uses authorization code + PKCE; Casbin supplies `viewer`, `operator`, and `admin` roles; a static admin key remains only for local compatibility. |
+| Operations | Automatic PostgreSQL migrations; separate content and transfer outcomes; incident assignee, investigation status, multiple notes, disposition, scoped exceptions, and full-window 1–90-day reports. Policy-state read failures fail closed. |
+| Console and identity | React + TypeScript + Ant Design + TanStack Query + ECharts with a flat, low-decoration operations UI. The posture dashboard focuses on active risk, remediation rate, MTTR, and inspection coverage. The incident workbench adds filtering, evidence timeline, assignee, investigation status, multiple notes, and persisted true/false-positive disposition. OIDC uses authorization code + PKCE; Casbin supplies `viewer`, `operator`, and `admin` roles; a static admin key remains only for local compatibility. |
 | Controlled forwarding | `/v1/forward/...` requires `allow` and a preconfigured target. Connectors support indirect environment-variable Bearer credentials and mTLS. Arbitrary URLs and redirects are rejected. |
 | Probes | `/health` reports storage, OIDC, mTLS, Analyzer, and model modes. `/ready` checks the database and the configured Analyzer. |
 

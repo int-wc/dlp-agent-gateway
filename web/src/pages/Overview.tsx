@@ -1,14 +1,13 @@
 import { useMemo, useState } from 'react'
-import { Alert, Avatar, Card, Col, Empty, List, Progress, Row, Segmented, Skeleton, Space, Tag } from 'antd'
+import { Alert, Card, Col, Empty, List, Progress, Row, Segmented, Skeleton, Space, Tag } from 'antd'
 import {
-  AlertOutlined, CheckCircleOutlined, ClockCircleOutlined, EyeOutlined, FileSearchOutlined,
-  SafetyCertificateOutlined, TeamOutlined, ThunderboltOutlined, UserOutlined,
+  AlertOutlined, CheckCircleOutlined, ClockCircleOutlined, SafetyCertificateOutlined,
 } from '@ant-design/icons'
 import ReactECharts from 'echarts-for-react'
 import { PageHeader } from '../components/PageHeader'
 import { MetricCard } from '../components/MetricCard'
 import { actionMeta, formatDateTime, reasonLabel } from '../components/AuditTable'
-import { useAudits, useExceptions, useFeedback, usePolicies, useReport, useUsers } from '../hooks/useOperations'
+import { useAudits, useFeedback, useReport } from '../hooks/useOperations'
 
 function durationLabel(milliseconds: number | null) {
   if (milliseconds === null) return '—'
@@ -22,9 +21,6 @@ export function Overview() {
   const report = useReport(days)
   const audits = useAudits()
   const feedback = useFeedback()
-  const exceptions = useExceptions()
-  const policies = usePolicies()
-  const users = useUsers()
   const counts = report.data?.counts ?? { allow: 0, review: 0, block: 0 }
   const totalRisks = counts.review + counts.block
   const cutoff = Date.now() - days * 24 * 60 * 60 * 1000
@@ -35,21 +31,9 @@ export function Overview() {
   const activeRisks = riskAudits.filter(item => !feedbackMap.has(item.id))
   const operations = report.data?.operations
   const remediationRate = totalRisks ? Math.round((operations?.remediated ?? remediated.length) / totalRisks * 100) : null
-  const falsePositiveRate = (operations?.remediated ?? remediated.length) ? Math.round((operations?.false_positives ?? 0) / (operations?.remediated ?? remediated.length) * 100) : null
   const meanResponse = operations?.mean_time_to_remediate_seconds == null ? null : operations.mean_time_to_remediate_seconds * 1000
   const coverage = operations?.inspection_coverage_percent ?? null
-  const pending = exceptions.data?.filter(item => item.status === 'pending') ?? []
-  const activePolicies = policies.data?.filter(item => item.enabled).length ?? 0
-  const activeDetectors = operations?.active_detectors ?? Object.keys(report.data?.top_reasons ?? {}).length
   const daysOnChart = Object.keys(report.data?.daily_counts ?? {}).sort()
-
-  const actorRanking = Array.from(riskAudits.reduce((map, item) => {
-    const current = map.get(item.actor) ?? { actor: item.actor, total: 0, block: 0, review: 0 }
-    current.total += 1
-    current[item.action as 'block' | 'review'] += 1
-    map.set(item.actor, current)
-    return map
-  }, new Map<string, { actor: string; total: number; block: number; review: number }>()).values()).sort((a, b) => b.total - a.total)
 
   const topReasons = Object.entries(report.data?.top_reasons ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 5)
   const maxReasonCount = topReasons[0]?.[1] ?? 1
@@ -82,17 +66,8 @@ export function Overview() {
     <div className="overview-metrics">
       <MetricCard label="活跃风险" value={operations?.active_risks ?? activeRisks.length} note={`${totalRisks} 个风险事件进入运营队列`} tone="block" icon={<AlertOutlined />} />
       <MetricCard label="处置率" value={remediationRate ?? '—'} suffix={remediationRate === null ? undefined : '%'} note={`${operations?.remediated ?? remediated.length} / ${totalRisks} 已记录结论`} tone="allow" icon={<CheckCircleOutlined />} />
-      <MetricCard label="误报率" value={falsePositiveRate ?? '—'} suffix={falsePositiveRate === null ? undefined : '%'} note={`${operations?.false_positives ?? 0} 个事件标记为误报`} icon={<EyeOutlined />} />
       <MetricCard label="平均响应时间" value={durationLabel(meanResponse)} note="从检测到人工处置结论" tone="review" icon={<ClockCircleOutlined />} />
       <MetricCard label="扫描覆盖" value={coverage ?? '—'} suffix={coverage === null ? undefined : '%'} note={`${report.data?.total ?? windowAudits.length} 次上传纳入覆盖统计`} tone="allow" icon={<SafetyCertificateOutlined />} />
-      <MetricCard label="高风险人员" value={operations?.high_risk_users ?? 0} note={`${(users.data ?? []).filter(item => item.status !== 'normal').length} 人处于重点管控`} icon={<TeamOutlined />} />
-    </div>
-
-    <div className="operations-strip">
-      <div><span className="strip-icon blue"><ThunderboltOutlined /></span><span>活跃策略</span><strong>{activePolicies}</strong><small>共 {policies.data?.length ?? 0} 条</small></div>
-      <div><span className="strip-icon teal"><FileSearchOutlined /></span><span>活跃检测器</span><strong>{activeDetectors}</strong><small>当前窗口有命中</small></div>
-      <div><span className="strip-icon amber"><ClockCircleOutlined /></span><span>待审批例外</span><strong>{pending.length}</strong><small>需要业务确认</small></div>
-      <div><span className="strip-icon red"><AlertOutlined /></span><span>已阻断外发</span><strong>{counts.block}</strong><small>文件未释放至下游</small></div>
     </div>
 
     <Row gutter={[16, 16]} className="section-row">
@@ -104,18 +79,15 @@ export function Overview() {
     </Row>
 
     <Row gutter={[16, 16]} className="section-row">
-      <Col xs={24} xl={10}><Card title={<div className="card-title-stack"><strong>优先调查队列</strong><span>尚未记录人工结论的高风险事件</span></div>} extra={<a href="#incidents">查看全部</a>} className="operations-card">
+      <Col xs={24} xl={14}><Card title={<div className="card-title-stack"><strong>优先调查队列</strong><span>尚未记录人工结论的高风险事件</span></div>} extra={<a href="#incidents">查看全部</a>} className="operations-card">
         <List dataSource={activeRisks.slice(0, 5)} locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前没有待处置风险" /> }} renderItem={item => <List.Item className="risk-queue-item" onClick={() => { location.hash = 'incidents' }}>
           <div className={`queue-severity ${item.action}`}><span>{item.action === 'block' ? '高' : '中'}</span></div>
           <div className="queue-main"><strong>{item.filename}</strong><span>{item.actor} → {item.destination}</span></div>
           <div className="queue-meta"><Tag color={actionMeta[item.action].color}>{actionMeta[item.action].label}</Tag><span>{formatDateTime(item.created_at, 'time')}</span></div>
         </List.Item>} />
       </Card></Col>
-      <Col xs={24} md={12} xl={7}><Card title={<div className="card-title-stack"><strong>高频检测信号</strong><span>策略与检测器命中排行</span></div>} className="operations-card">
+      <Col xs={24} xl={10}><Card title={<div className="card-title-stack"><strong>高频检测信号</strong><span>策略与检测器命中排行</span></div>} className="operations-card">
         {topReasons.length ? <div className="reason-ranking">{topReasons.map(([reason, count], index) => <div key={reason}><div><span><b>{index + 1}</b>{reasonLabel(reason)}</span><strong>{count}</strong></div><Progress percent={Math.round(count / maxReasonCount * 100)} showInfo={false} strokeColor={index === 0 ? '#d95858' : '#4d7fd1'} trailColor="#edf1f5" size="small" /></div>)}</div> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无检测信号" />}
-      </Card></Col>
-      <Col xs={24} md={12} xl={7}><Card title={<div className="card-title-stack"><strong>高风险身份</strong><span>按风险事件数量排序</span></div>} className="operations-card">
-        <List dataSource={actorRanking.slice(0, 5)} locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无高风险身份" /> }} renderItem={item => <List.Item className="actor-risk-item"><Avatar icon={<UserOutlined />} /><div><strong>{item.actor}</strong><span>{item.block} 阻断 · {item.review} 待复核</span></div><Tag color={item.block ? 'red' : 'orange'}>{item.total}</Tag></List.Item>} />
       </Card></Col>
     </Row>
 

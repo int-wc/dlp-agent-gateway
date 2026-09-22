@@ -44,6 +44,23 @@ export interface Feedback {
   created_at: string
 }
 
+export type IncidentStatus = 'new' | 'investigating' | 'pending_business' | 'resolved'
+
+export interface Incident {
+  audit_id: number
+  status: IncidentStatus
+  assignee: string
+  updated_at: string
+}
+
+export interface IncidentNote {
+  id: number
+  audit_id: number
+  author: string
+  body: string
+  created_at: string
+}
+
 export interface AdminEvent {
   id: number
   created_at: string

@@ -41,18 +41,6 @@ const navigation: MenuProps['items'] = [
   ] },
 ]
 
-const pageMeta: Record<string, { title: string; context: string }> = {
-  dashboard: { title: '风险态势总览', context: 'Security posture' },
-  incidents: { title: '事件中心', context: 'Investigation workspace' },
-  audits: { title: '审计日志', context: 'Evidence ledger' },
-  policies: { title: '策略管理', context: 'Policy control' },
-  exceptions: { title: '例外与审批', context: 'Time-bound access' },
-  people: { title: '人员风险', context: 'Identity risk' },
-  integrations: { title: '集成与测试实验室', context: 'Business entry' },
-  reports: { title: '运营报告', context: 'Risk analytics' },
-  settings: { title: '系统设置', context: 'Trust configuration' },
-}
-
 export default function App() {
   const [page, setPage] = useState(() => location.hash.slice(1) || 'dashboard')
   const [collapsed, setCollapsed] = useState(() => window.innerWidth <= 900)
@@ -99,7 +87,6 @@ export default function App() {
   if (!session?.authenticated) return <Login session={session ?? { authenticated: false, mode: 'static' }} onStaticLogin={authenticate} />
 
   const displayName = session.identity?.name || session.identity?.email || session.identity?.subject || '管理员'
-  const currentPage = pageMeta[page] ?? pageMeta.dashboard
   return <Layout className="app-shell">
     <Sider width={246} collapsedWidth={76} collapsed={collapsed} className="app-sider" trigger={null}>
       <div className="brand"><div className="brand-mark"><SafetyCertificateOutlined /></div>{!collapsed && <div><strong>Sentinel Gate</strong><span>DLP Operations</span></div>}</div>
@@ -109,10 +96,8 @@ export default function App() {
     <Layout>
       <Header className="app-header">
         <Button className="header-toggle" type="text" icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />} onClick={() => setCollapsed(value => !value)} aria-label={collapsed ? '展开导航' : '收起导航'} />
-        <div className="header-context"><span>{currentPage.context}</span><strong>{currentPage.title}</strong></div>
         <div className="header-spacer" />
-        <div className="header-environment"><span className="environment-dot" /><div><strong>本地演示环境</strong><small>仅处理合成数据</small></div></div>
-        <div className="header-status"><Badge status={health.data?.status === 'ok' ? 'success' : 'error'} /><span>{health.data?.status === 'ok' ? '网关正常' : '网关异常'}</span></div>
+        <div className="header-status"><Badge status={health.data?.status === 'ok' ? 'success' : 'error'} /><span>{health.data?.status === 'ok' ? '本地演示 · 正常' : '网关异常'}</span></div>
         <Dropdown menu={{ items: [{ key: 'logout', icon: <LogoutOutlined />, label: '退出登录', onClick: logout }] }} placement="bottomRight">
           <Button type="text" className="user-button"><Avatar size="small" icon={<UserOutlined />} /><span>{displayName}</span><Typography.Text type="secondary">{role}</Typography.Text></Button>
         </Dropdown>
@@ -123,5 +108,5 @@ export default function App() {
 }
 
 export function ThemedApp() {
-  return <ConfigProvider theme={{ algorithm: theme.defaultAlgorithm, token: { colorPrimary: '#2869d8', colorInfo: '#2869d8', borderRadius: 10, colorBgLayout: '#f3f6fa', fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' }, components: { Layout: { headerBg: '#fff', siderBg: '#111c2e' }, Menu: { darkItemBg: '#111c2e', darkItemSelectedBg: '#213a62', darkItemHoverBg: '#182942' }, Card: { headerFontSize: 15 } } }}><App /></ConfigProvider>
+  return <ConfigProvider theme={{ algorithm: theme.defaultAlgorithm, token: { colorPrimary: '#2869d8', colorInfo: '#2869d8', borderRadius: 6, colorBgLayout: '#f5f6f8', fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', boxShadow: 'none', boxShadowSecondary: 'none' }, components: { Layout: { headerBg: '#fff', siderBg: '#111827' }, Menu: { darkItemBg: '#111827', darkItemSelectedBg: '#233553', darkItemHoverBg: '#1b293d' }, Card: { headerFontSize: 14 } } }}><App /></ConfigProvider>
 }

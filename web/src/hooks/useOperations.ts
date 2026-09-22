@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { getAudits, getEvents, getExceptions, getFeedback, getPolicies, getReport, getUsers } from '../lib/api'
+import { getAudits, getEvents, getExceptions, getFeedback, getIncidents, getPolicies, getReport, getUsers } from '../lib/api'
 
 export const operationsKeys = {
   all: ['operations'] as const,
@@ -8,6 +8,8 @@ export const operationsKeys = {
   users: ['operations', 'users'] as const,
   exceptions: ['operations', 'exceptions'] as const,
   feedback: ['operations', 'feedback'] as const,
+  incidents: ['operations', 'incidents'] as const,
+  incidentNotes: (auditID: number) => ['operations', 'incidents', auditID, 'notes'] as const,
   report: (days: number) => ['operations', 'report', days] as const,
   events: ['operations', 'events'] as const,
 }
@@ -26,6 +28,9 @@ export function useExceptions(enabled = true) {
 }
 export function useFeedback(enabled = true) {
   return useQuery({ queryKey: operationsKeys.feedback, queryFn: getFeedback, enabled })
+}
+export function useIncidents(enabled = true) {
+  return useQuery({ queryKey: operationsKeys.incidents, queryFn: getIncidents, enabled })
 }
 export function useReport(days = 7, enabled = true) {
   return useQuery({ queryKey: operationsKeys.report(days), queryFn: () => getReport(days), enabled })

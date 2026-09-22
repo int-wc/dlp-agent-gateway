@@ -6,11 +6,11 @@ import {
 import type { TableColumnsType } from 'antd'
 import {
   CheckCircleOutlined, ClockCircleOutlined, ColumnHeightOutlined, FileSearchOutlined,
-  SafetyCertificateOutlined, SearchOutlined, StopOutlined, UserOutlined,
+  MessageOutlined, SafetyCertificateOutlined, SearchOutlined, StopOutlined, UserOutlined,
 } from '@ant-design/icons'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { api } from '../lib/api'
-import type { Action, Audit, ExceptionRequest, Feedback } from '../lib/types'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { api, getIncidentNotes } from '../lib/api'
+import type { Action, Audit, ExceptionRequest, Feedback, Incident, IncidentStatus } from '../lib/types'
 import { operationsKeys } from '../hooks/useOperations'
 import { actionMeta, formatBytes, formatDateTime, reasonLabel, transferLabels } from './AuditTable'
 
@@ -43,9 +43,17 @@ function verdictMeta(feedback?: Feedback) {
     : { label: '已确认风险', color: 'red', className: 'confirmed' }
 }
 
-export function IncidentWorkbench({ audits, feedback, exceptions, loading, canOperate }: {
+const incidentStatusMeta: Record<IncidentStatus, { label: string; color: string }> = {
+  new: { label: '新建', color: 'blue' },
+  investigating: { label: '调查中', color: 'gold' },
+  pending_business: { label: '待业务确认', color: 'orange' },
+  resolved: { label: '已关闭', color: 'default' },
+}
+
+export function IncidentWorkbench({ audits, feedback, incidents, exceptions, loading, canOperate }: {
   audits: Audit[]
   feedback: Feedback[]
+  incidents: Incident[]
   exceptions: ExceptionRequest[]
   loading: boolean
   canOperate: boolean
@@ -57,9 +65,13 @@ export function IncidentWorkbench({ audits, feedback, exceptions, loading, canOp
   const [visibleColumns, setVisibleColumns] = useState<ColumnKey[]>(defaultColumns)
   const [selectedID, setSelectedID] = useState<number | null>(null)
   const [feedbackOpen, setFeedbackOpen] = useState(false)
+  const [draftStatus, setDraftStatus] = useState<IncidentStatus>('new')
+  const [draftAssignee, setDraftAssignee] = useState('')
+  const [noteBody, setNoteBody] = useState('')
   const [form] = Form.useForm<{ verdict: Feedback['verdict']; note: string }>()
   const queryClient = useQueryClient()
   const feedbackMap = useMemo(() => new Map(feedback.map(item => [item.audit_id, item])), [feedback])
+  const incidentMap = useMemo(() => new Map(incidents.map(item => [item.audit_id, item])), [incidents])
 
   const data = useMemo(() => {
     const cutoff = windowSize === '24h' ? Date.now() - 24 * 60 * 60 * 1000 : windowSize === '7d' ? Date.now() - 7 * 24 * 60 * 60 * 1000 : 0
@@ -67,13 +79,14 @@ export function IncidentWorkbench({ audits, feedback, exceptions, loading, canOp
     return audits.filter(item => {
       if (item.action === 'allow') return false
       if (decision !== 'all' && item.action !== decision) return false
-      const resolved = feedbackMap.has(item.id)
+      const status = incidentMap.get(item.id)?.status ?? (feedbackMap.has(item.id) ? 'resolved' : 'new')
+      const resolved = status === 'resolved'
       if (workflow === 'open' && resolved) return false
       if (workflow === 'resolved' && !resolved) return false
       if (cutoff && new Date(item.created_at).getTime() < cutoff) return false
       return !needle || [item.id, item.actor, item.destination, item.filename, ...item.reasons, ...item.signals].join(' ').toLowerCase().includes(needle)
     })
-  }, [audits, decision, feedbackMap, search, windowSize, workflow])
+  }, [audits, decision, feedbackMap, incidentMap, search, windowSize, workflow])
 
   useEffect(() => {
     if (!data.length) { setSelectedID(null); return }
@@ -82,12 +95,39 @@ export function IncidentWorkbench({ audits, feedback, exceptions, loading, canOp
 
   const selected = data.find(item => item.id === selectedID) ?? null
   const selectedFeedback = selected ? feedbackMap.get(selected.id) : undefined
+  const selectedIncident = selected ? incidentMap.get(selected.id) : undefined
   const selectedException = selected ? exceptions.find(item => item.audit_id === selected.id) : undefined
   const actorActivity = selected ? audits.filter(item => item.actor === selected.actor).slice(0, 8) : []
+  const notes = useQuery({ queryKey: operationsKeys.incidentNotes(selectedID ?? 0), queryFn: () => getIncidentNotes(selectedID!), enabled: !!selectedID })
+
+  useEffect(() => {
+    setDraftStatus(selectedIncident?.status ?? (selectedFeedback ? 'resolved' : 'new'))
+    setDraftAssignee(selectedIncident?.assignee ?? '')
+    setNoteBody('')
+  }, [selectedID, selectedIncident, selectedFeedback])
+
+  const updateIncident = useMutation({
+    mutationFn: (value: { status: IncidentStatus; assignee: string }) => api(`/v1/admin/incidents/${selected?.id}`, { method: 'PUT', body: JSON.stringify(value) }),
+    onSuccess: () => { message.success('事件状态已保存'); queryClient.invalidateQueries({ queryKey: operationsKeys.incidents }) },
+    onError: (error: Error) => message.error(error.message),
+  })
+
+  const addNote = useMutation({
+    mutationFn: (body: string) => api(`/v1/admin/incidents/${selected?.id}/notes`, { method: 'POST', body: JSON.stringify({ body }) }),
+    onSuccess: () => { setNoteBody(''); message.success('调查记录已添加'); queryClient.invalidateQueries({ queryKey: operationsKeys.incidentNotes(selectedID ?? 0) }) },
+    onError: (error: Error) => message.error(error.message),
+  })
 
   const submitFeedback = useMutation({
     mutationFn: (value: { verdict: Feedback['verdict']; note: string }) => api(`/v1/admin/audits/${selected?.id}/feedback`, { method: 'PUT', body: JSON.stringify(value) }),
-    onSuccess: () => {
+    onSuccess: async () => {
+      if (selected) {
+        try {
+          await api(`/v1/admin/incidents/${selected.id}`, { method: 'PUT', body: JSON.stringify({ status: 'resolved', assignee: draftAssignee }) })
+        } catch (error) {
+          message.warning(`结论已保存，但事件状态更新失败：${(error as Error).message}`)
+        }
+      }
       message.success('处置结论已写入审计记录')
       setFeedbackOpen(false)
       queryClient.invalidateQueries({ queryKey: operationsKeys.all })
@@ -107,7 +147,7 @@ export function IncidentWorkbench({ audits, feedback, exceptions, loading, canOp
     { key: 'file', title: '文件', dataIndex: 'filename', ellipsis: true, width: 190, render: (value, item) => <div><strong className="file-name">{value}</strong><div className="cell-sub">{formatBytes(item.size)}</div></div> },
     { key: 'reason', title: '命中原因', dataIndex: 'reasons', width: 190, render: (values: string[]) => <Space size={[4, 4]} wrap>{values.slice(0, 2).map(value => <Tag key={value} className="signal-tag">{reasonLabel(value)}</Tag>)}{values.length > 2 && <Tag>+{values.length - 2}</Tag>}</Space> },
     { key: 'transfer', title: '传输', dataIndex: 'transfer_status', width: 106, render: value => <span className={`transfer transfer-${value}`}>{transferLabels[value] ?? value}</span> },
-    { key: 'status', title: '处置状态', width: 122, render: (_, item) => { const meta = verdictMeta(feedbackMap.get(item.id)); return <Tag color={meta.color}>{meta.label}</Tag> } },
+    { key: 'status', title: '调查状态', width: 122, render: (_, item) => { const incident = incidentMap.get(item.id); const status = incident?.status ?? (feedbackMap.has(item.id) ? 'resolved' : 'new'); const meta = incidentStatusMeta[status]; return <Tag color={meta.color}>{meta.label}</Tag> } },
   ]
   const columns = allColumns.filter(column => visibleColumns.includes(column.key as ColumnKey))
 
@@ -116,6 +156,7 @@ export function IncidentWorkbench({ audits, feedback, exceptions, loading, canOp
     selected.transfer_status !== 'not_requested' ? { color: selected.forwarded ? '#18a174' : '#d95a57', children: <div className="timeline-entry"><strong>传输控制：{transferLabels[selected.transfer_status] ?? selected.transfer_status}</strong><span>{selected.upstream_status ? `下游响应 HTTP ${selected.upstream_status}` : '未向下游释放文件'}</span></div> } : null,
     selectedException ? { color: selectedException.status === 'approved' ? '#18a174' : '#d89a31', children: <div className="timeline-entry"><strong>例外申请：{({ pending: '待审批', approved: '已批准', rejected: '已拒绝' } as const)[selectedException.status]}</strong><span>{formatDateTime(selectedException.created_at)} · {selectedException.justification}</span></div> } : null,
     selectedFeedback ? { color: selectedFeedback.verdict === 'false_positive' ? '#8792a5' : '#d95a57', dot: <CheckCircleOutlined />, children: <div className="timeline-entry"><strong>{selectedFeedback.verdict === 'false_positive' ? '运营人员标记为误报' : '运营人员确认风险'}</strong><span>{formatDateTime(selectedFeedback.created_at)}{selectedFeedback.note ? ` · ${selectedFeedback.note}` : ''}</span></div> } : null,
+    ...(notes.data ?? []).map(note => ({ color: '#5b769f', dot: <MessageOutlined />, children: <div className="timeline-entry"><strong>{note.author} 添加调查记录</strong><span>{formatDateTime(note.created_at)} · {note.body}</span></div> })),
   ].filter(Boolean) as { color: string; dot?: React.ReactNode; children: React.ReactNode }[] : []
 
   const detailTabs = selected ? [
@@ -124,13 +165,16 @@ export function IncidentWorkbench({ audits, feedback, exceptions, loading, canOp
         <div><span>业务身份</span><strong>{selected.actor}</strong><small>上传至 {selected.destination}</small></div>
         <div><span>文件对象</span><strong title={selected.filename}>{selected.filename}</strong><small>{formatBytes(selected.size)}</small></div>
         <div><span>内容判定</span><strong>{actionMeta[selected.action].label}</strong><small>{selected.reasons.length} 个命中条件</small></div>
-        <div><span>处置结论</span><strong>{verdictMeta(selectedFeedback).label}</strong><small>{selectedFeedback ? formatDateTime(selectedFeedback.created_at) : '等待运营人员复核'}</small></div>
+        <div><span>调查状态</span><strong>{incidentStatusMeta[selectedIncident?.status ?? (selectedFeedback ? 'resolved' : 'new')].label}</strong><small>{selectedIncident?.assignee ? `负责人：${selectedIncident.assignee}` : '尚未分配负责人'}</small></div>
       </div>
       <div className="detail-section"><div className="detail-section-title">命中条件</div><Space size={[6, 8]} wrap>{selected.reasons.length ? selected.reasons.map(reason => <Tag color="red" key={reason}>{reasonLabel(reason)}</Tag>) : <Typography.Text type="secondary">没有命中条件</Typography.Text>}</Space></div>
       {selectedFeedback?.note && <div className="operator-note"><span>处置备注</span><p>{selectedFeedback.note}</p></div>}
       {selectedException && <div className="operator-note exception-note"><span>例外申请 #{selectedException.id}</span><p>{selectedException.justification}</p></div>}
     </div> },
-    { key: 'events', label: `事件 ${timeline.length}`, children: <div className="incident-tab-content timeline-wrap"><Timeline items={timeline} /></div> },
+    { key: 'events', label: `时间线 ${timeline.length}`, children: <div className="incident-tab-content timeline-wrap">
+      {canOperate && <div className="note-composer"><Input.TextArea value={noteBody} onChange={event => setNoteBody(event.target.value)} maxLength={500} autoSize={{ minRows: 2, maxRows: 4 }} placeholder="添加调查记录或业务确认结果" /><Button type="primary" disabled={!noteBody.trim()} loading={addNote.isPending} onClick={() => addNote.mutate(noteBody.trim())}>添加记录</Button></div>}
+      <Timeline items={timeline} />
+    </div> },
     { key: 'activity', label: `用户活动 ${actorActivity.length}`, children: <div className="incident-tab-content"><Table<Audit> rowKey="id" size="small" pagination={false} dataSource={actorActivity} columns={[
       { title: '时间', dataIndex: 'created_at', width: 150, render: value => formatDateTime(value) },
       { title: '文件', dataIndex: 'filename', ellipsis: true },
@@ -158,14 +202,21 @@ export function IncidentWorkbench({ audits, feedback, exceptions, loading, canOp
     </div>
     <div className="incident-workbench">
       <div className="incident-list-pane">
-        <div className="incident-list-meta"><span><strong>{data.length}</strong> 个事件</span><span>{data.filter(item => !feedbackMap.has(item.id)).length} 个待处置</span></div>
+        <div className="incident-list-meta"><span><strong>{data.length}</strong> 个事件</span><span>{data.filter(item => (incidentMap.get(item.id)?.status ?? (feedbackMap.has(item.id) ? 'resolved' : 'new')) !== 'resolved').length} 个未关闭</span></div>
         <Table<Audit> rowKey="id" size="small" loading={loading} dataSource={data} columns={columns} pagination={{ pageSize: 12, showSizeChanger: false, hideOnSinglePage: true }} scroll={{ x: 920 }} locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前筛选条件下没有事件" /> }} rowClassName={record => record.id === selectedID ? 'selected-incident-row' : ''} onRow={record => ({ onClick: () => setSelectedID(record.id) })} />
       </div>
       <aside className="incident-detail-pane">
         {!selected ? <div className="detail-empty"><FileSearchOutlined /><strong>选择一个事件开始调查</strong><span>这里会展示证据链、相关活动与处置操作。</span></div> : <>
           <div className="incident-detail-head">
-            <div className="incident-title-row"><div><span className="incident-kicker">INC-{String(selected.id).padStart(5, '0')}</span><h2>{selected.filename}</h2></div><Progress type="circle" percent={riskScore(selected)} size={58} strokeColor={riskScore(selected) >= 85 ? '#d95555' : '#dc9733'} format={value => <span className="risk-ring-value">{value}</span>} /></div>
-            <Space size={[6, 6]} wrap><Tag color={actionMeta[selected.action].color}>{actionMeta[selected.action].label}</Tag><Tag color={verdictMeta(selectedFeedback).color}>{verdictMeta(selectedFeedback).label}</Tag><span className="detail-time"><ClockCircleOutlined /> {formatDateTime(selected.created_at)}</span></Space>
+            <div className="incident-title-row"><div><span className="incident-kicker">INC-{String(selected.id).padStart(5, '0')}</span><h2>{selected.filename}</h2></div><div className="detail-risk"><strong>{riskScore(selected)}</strong><span>风险分</span></div></div>
+            <Space size={[6, 6]} wrap><Tag color={actionMeta[selected.action].color}>{actionMeta[selected.action].label}</Tag><Tag color={incidentStatusMeta[selectedIncident?.status ?? (selectedFeedback ? 'resolved' : 'new')].color}>{incidentStatusMeta[selectedIncident?.status ?? (selectedFeedback ? 'resolved' : 'new')].label}</Tag><span className="detail-time"><ClockCircleOutlined /> {formatDateTime(selected.created_at)}</span></Space>
+          </div>
+          <div className="case-controls">
+            <Select value={draftStatus} onChange={setDraftStatus} disabled={!canOperate} options={[
+              { value: 'new', label: '新建' }, { value: 'investigating', label: '调查中' }, { value: 'pending_business', label: '待业务确认' }, { value: 'resolved', label: '已关闭', disabled: !selectedFeedback },
+            ]} />
+            <Input value={draftAssignee} onChange={event => setDraftAssignee(event.target.value)} disabled={!canOperate} maxLength={80} placeholder="负责人（账号或邮箱）" />
+            <Button disabled={!canOperate} loading={updateIncident.isPending} onClick={() => updateIncident.mutate({ status: draftStatus, assignee: draftAssignee.trim() })}>保存</Button>
           </div>
           <Tabs className="incident-tabs" items={detailTabs} />
           <div className="incident-action-bar">

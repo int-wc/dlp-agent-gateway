@@ -30,6 +30,10 @@ type Repository interface {
 	RejectException(id int64) error
 	Feedback(auditID int64, verdict, note string) error
 	Feedbacks() ([]Feedback, error)
+	Incidents() ([]Incident, error)
+	UpsertIncident(auditID int64, status, assignee string) error
+	IncidentNotes(auditID int64) ([]IncidentNote, error)
+	AddIncidentNote(auditID int64, author, body string) (int64, error)
 	Event(event, target string) error
 	Events() ([]map[string]any, error)
 }

@@ -106,7 +106,7 @@ func adminRequest(t *testing.T, method, url string, body io.Reader) *http.Respon
 
 func TestEmptyAdminCollectionsAndConsoleAreUsable(t *testing.T) {
 	srv := newTestServer(t)
-	for _, endpoint := range []string{"/v1/admin/audits", "/v1/admin/policies", "/v1/admin/exceptions", "/v1/admin/events", "/v1/admin/feedback"} {
+	for _, endpoint := range []string{"/v1/admin/audits", "/v1/admin/policies", "/v1/admin/exceptions", "/v1/admin/events", "/v1/admin/feedback", "/v1/admin/incidents"} {
 		items := bodyJSONArray(t, adminRequest(t, http.MethodGet, srv.URL+endpoint, nil))
 		if items == nil || len(items) != 0 {
 			t.Fatalf("%s=%v, want []", endpoint, items)
@@ -129,6 +129,71 @@ func TestEmptyAdminCollectionsAndConsoleAreUsable(t *testing.T) {
 	}
 }
 
+func TestIncidentWorkflowPersistsStatusAndNotes(t *testing.T) {
+	srv := newTestServer(t)
+	result := bodyJSON(t, upload(t, srv.URL, "/v1/check/external", "synthetic-review.txt", []byte("Call 13800138000"), clientKey))
+	auditID := int64(result["audit_id"].(float64))
+
+	payload, _ := json.Marshal(map[string]any{"status": "investigating", "assignee": "security-operator"})
+	response := adminRequest(t, http.MethodPut, srv.URL+"/v1/admin/incidents/"+strconv.FormatInt(auditID, 10), bytes.NewReader(payload))
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("incident update status=%d body=%v", response.StatusCode, bodyJSON(t, response))
+	}
+	response.Body.Close()
+
+	notePayload, _ := json.Marshal(map[string]any{"body": "Synthetic business context requested."})
+	response = adminRequest(t, http.MethodPost, srv.URL+"/v1/admin/incidents/"+strconv.FormatInt(auditID, 10)+"/notes", bytes.NewReader(notePayload))
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("note status=%d body=%v", response.StatusCode, bodyJSON(t, response))
+	}
+	response.Body.Close()
+
+	incidents := bodyJSONArray(t, adminRequest(t, http.MethodGet, srv.URL+"/v1/admin/incidents", nil))
+	if len(incidents) != 1 || incidents[0]["status"] != "investigating" || incidents[0]["assignee"] != "security-operator" {
+		t.Fatalf("incidents=%v", incidents)
+	}
+	notes := bodyJSONArray(t, adminRequest(t, http.MethodGet, srv.URL+"/v1/admin/incidents/"+strconv.FormatInt(auditID, 10)+"/notes", nil))
+	if len(notes) != 1 || notes[0]["author"] != "local-admin" || notes[0]["body"] != "Synthetic business context requested." {
+		t.Fatalf("notes=%v", notes)
+	}
+}
+
+func TestIncidentWorkflowRejectsInvalidAndAllowEvents(t *testing.T) {
+	srv := newTestServer(t)
+	allow := bodyJSON(t, upload(t, srv.URL, "/v1/check/external", "synthetic-safe.txt", []byte("synthetic public content"), clientKey))
+	allowID := strconv.FormatInt(int64(allow["audit_id"].(float64)), 10)
+
+	payload, _ := json.Marshal(map[string]any{"status": "investigating", "assignee": "operator"})
+	response := adminRequest(t, http.MethodPut, srv.URL+"/v1/admin/incidents/"+allowID, bytes.NewReader(payload))
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("allow incident status=%d", response.StatusCode)
+	}
+	response.Body.Close()
+
+	notePayload, _ := json.Marshal(map[string]any{"body": "must not attach to allow event"})
+	response = adminRequest(t, http.MethodPost, srv.URL+"/v1/admin/incidents/"+allowID+"/notes", bytes.NewReader(notePayload))
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("allow note status=%d", response.StatusCode)
+	}
+	response.Body.Close()
+
+	review := bodyJSON(t, upload(t, srv.URL, "/v1/check/external", "synthetic-review.txt", []byte("Call 13800138000"), clientKey))
+	reviewID := strconv.FormatInt(int64(review["audit_id"].(float64)), 10)
+	invalidPayload, _ := json.Marshal(map[string]any{"status": "deleted", "assignee": "operator"})
+	response = adminRequest(t, http.MethodPut, srv.URL+"/v1/admin/incidents/"+reviewID, bytes.NewReader(invalidPayload))
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid status=%d", response.StatusCode)
+	}
+	response.Body.Close()
+
+	resolvedPayload, _ := json.Marshal(map[string]any{"status": "resolved", "assignee": "operator"})
+	response = adminRequest(t, http.MethodPut, srv.URL+"/v1/admin/incidents/"+reviewID, bytes.NewReader(resolvedPayload))
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("resolution without verdict status=%d", response.StatusCode)
+	}
+	response.Body.Close()
+}
+
 func TestGoGatewayHealthAndFailClosedDecisions(t *testing.T) {
 	srv := newTestServer(t)
 	resp, err := http.Get(srv.URL + "/health")
@@ -136,7 +201,7 @@ func TestGoGatewayHealthAndFailClosedDecisions(t *testing.T) {
 		t.Fatal(err)
 	}
 	health := bodyJSON(t, resp)
-	if health["status"] != "ok" || health["version"] != "0.4.0" {
+	if health["status"] != "ok" || health["version"] != "0.5.0" {
 		t.Fatalf("health=%v", health)
 	}
 	resp, err = http.Get(srv.URL + "/ready")
