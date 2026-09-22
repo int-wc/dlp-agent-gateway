@@ -22,6 +22,7 @@ export interface Policy {
   keyword: string
   action: 'review' | 'block'
   scope: 'all' | 'internal' | 'external'
+  mode: 'draft' | 'monitor' | 'enforce'
   enabled: boolean
 }
 

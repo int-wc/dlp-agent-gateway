@@ -201,7 +201,7 @@ func TestGoGatewayHealthAndFailClosedDecisions(t *testing.T) {
 		t.Fatal(err)
 	}
 	health := bodyJSON(t, resp)
-	if health["status"] != "ok" || health["version"] != "0.5.0" {
+	if health["status"] != "ok" || health["version"] != "0.6.0" {
 		t.Fatalf("health=%v", health)
 	}
 	resp, err = http.Get(srv.URL + "/ready")
@@ -319,6 +319,51 @@ func TestGoGatewayPolicyAndAdmin(t *testing.T) {
 	if result["action"] != "block" {
 		t.Fatalf("policy decision=%v", result)
 	}
+}
+
+func TestPolicyLifecycleModes(t *testing.T) {
+	srv := newTestServer(t)
+	payload, _ := json.Marshal(map[string]any{"keyword": "monitor canary", "action": "block", "scope": "external", "mode": "monitor"})
+	created := bodyJSON(t, adminRequest(t, http.MethodPost, srv.URL+"/v1/admin/policies", bytes.NewReader(payload)))
+	policyID := int64(created["id"].(float64))
+
+	monitored := bodyJSON(t, upload(t, srv.URL, "/v1/check/external", "monitor.txt", []byte("monitor canary synthetic"), clientKey))
+	if monitored["action"] != "allow" || !strings.Contains(strings.Join(anyStrings(monitored["signals"]), ","), "policy_monitor_") {
+		t.Fatalf("monitor decision=%v", monitored)
+	}
+
+	payload, _ = json.Marshal(map[string]any{"keyword": "monitor canary", "action": "block", "scope": "external", "mode": "enforce"})
+	response := adminRequest(t, http.MethodPut, srv.URL+"/v1/admin/policies/"+strconv.FormatInt(policyID, 10), bytes.NewReader(payload))
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("enforce update status=%d body=%v", response.StatusCode, bodyJSON(t, response))
+	}
+	response.Body.Close()
+	enforced := bodyJSON(t, upload(t, srv.URL, "/v1/check/external", "enforce.txt", []byte("monitor canary synthetic"), clientKey))
+	if enforced["action"] != "block" {
+		t.Fatalf("enforce decision=%v", enforced)
+	}
+
+	payload, _ = json.Marshal(map[string]any{"keyword": "monitor canary", "action": "block", "scope": "external", "mode": "draft"})
+	response = adminRequest(t, http.MethodPut, srv.URL+"/v1/admin/policies/"+strconv.FormatInt(policyID, 10), bytes.NewReader(payload))
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("draft update status=%d body=%v", response.StatusCode, bodyJSON(t, response))
+	}
+	response.Body.Close()
+	draft := bodyJSON(t, upload(t, srv.URL, "/v1/check/external", "draft.txt", []byte("monitor canary synthetic"), clientKey))
+	if draft["action"] != "allow" || strings.Contains(strings.Join(anyStrings(draft["signals"]), ","), "policy_monitor_") {
+		t.Fatalf("draft decision=%v", draft)
+	}
+}
+
+func anyStrings(value any) []string {
+	items, _ := value.([]any)
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		if text, ok := item.(string); ok {
+			result = append(result, text)
+		}
+	}
+	return result
 }
 
 func TestGoGatewayPolicyExceptionWorkflow(t *testing.T) {

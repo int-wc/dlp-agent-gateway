@@ -30,9 +30,12 @@ func TestPostgresRepositoryWorkflow(t *testing.T) {
 	if err != nil || status != "privileged" {
 		t.Fatalf("status=%q err=%v", status, err)
 	}
-	policyID, err := repository.AddPolicy(Policy{Keyword: "synthetic canary", Action: "review", Scope: "external", Enabled: true})
+	policyID, err := repository.AddPolicy(Policy{Keyword: "synthetic canary", Action: "review", Scope: "external", Mode: "monitor"})
 	if err != nil || policyID != 1 {
 		t.Fatalf("policy id=%d err=%v", policyID, err)
+	}
+	if policies, err := repository.Policies(); err != nil || len(policies) != 1 || policies[0].Mode != "monitor" || !policies[0].Enabled {
+		t.Fatalf("policies=%v err=%v", policies, err)
 	}
 	auditID, err := repository.InsertAudit(Audit{Actor: "synthetic-user", Destination: "external", Filename: "synthetic.txt", SHA256: "abc", Size: 12, Action: "review", Reasons: []string{"policy_1"}, Signals: []string{}, ModelStatus: "disabled"})
 	if err != nil || auditID != 1 {

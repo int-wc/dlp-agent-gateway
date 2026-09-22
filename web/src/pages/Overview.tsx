@@ -3,7 +3,7 @@ import { Alert, Card, Col, Empty, List, Progress, Row, Segmented, Skeleton, Spac
 import {
   AlertOutlined, CheckCircleOutlined, ClockCircleOutlined, SafetyCertificateOutlined,
 } from '@ant-design/icons'
-import ReactECharts from 'echarts-for-react'
+import { Chart } from '../components/Chart'
 import { PageHeader } from '../components/PageHeader'
 import { MetricCard } from '../components/MetricCard'
 import { actionMeta, formatDateTime, reasonLabel } from '../components/AuditTable'
@@ -71,9 +71,9 @@ export function Overview() {
     </div>
 
     <Row gutter={[16, 16]} className="section-row">
-      <Col xs={24} xl={16}><Card title={<div className="card-title-stack"><strong>风险与扫描趋势</strong><span>识别风险峰值和流量变化</span></div>} extra={<span className="muted">UTC · 最近 {days} 天</span>} className="chart-card overview-trend">{report.isLoading ? <Skeleton active /> : daysOnChart.length ? <ReactECharts option={trend} style={{ height: 300 }} /> : <Empty description="产生审计事件后显示趋势" />}</Card></Col>
+      <Col xs={24} xl={16}><Card title={<div className="card-title-stack"><strong>风险与扫描趋势</strong><span>识别风险峰值和流量变化</span></div>} extra={<span className="muted">UTC · 最近 {days} 天</span>} className="chart-card overview-trend">{report.isLoading ? <Skeleton active /> : daysOnChart.length ? <Chart option={trend} style={{ height: 300 }} /> : <Empty description="产生审计事件后显示趋势" />}</Card></Col>
       <Col xs={24} xl={8}><Card title={<div className="card-title-stack"><strong>风险分布</strong><span>当前时间窗口的判定结构</span></div>} className="chart-card posture-card">
-        {report.data?.total ? <div className="posture-chart"><ReactECharts option={posture} style={{ height: 230 }} /><div className="posture-center"><strong>{riskAudits.length}</strong><span>风险事件</span></div></div> : <Empty description="暂无扫描数据" />}
+        {report.data?.total ? <div className="posture-chart"><Chart option={posture} style={{ height: 230 }} /><div className="posture-center"><strong>{riskAudits.length}</strong><span>风险事件</span></div></div> : <Empty description="暂无扫描数据" />}
         <div className="posture-legend"><span><i className="review" />待复核 <strong>{counts.review}</strong></span><span><i className="block" />阻断 <strong>{counts.block}</strong></span><span><i className="allow" />允许 <strong>{counts.allow}</strong></span></div>
       </Card></Col>
     </Row>

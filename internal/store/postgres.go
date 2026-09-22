@@ -129,7 +129,7 @@ func sortStrings(values []string) {
 func (p *Postgres) Policies() ([]Policy, error) {
 	ctx, cancel := dbContext()
 	defer cancel()
-	rows, err := p.pool.Query(ctx, "SELECT id,keyword,action,scope,enabled FROM policies ORDER BY id")
+	rows, err := p.pool.Query(ctx, "SELECT id,keyword,action,scope,mode,enabled FROM policies ORDER BY id")
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +137,7 @@ func (p *Postgres) Policies() ([]Policy, error) {
 	result := []Policy{}
 	for rows.Next() {
 		var item Policy
-		if err := rows.Scan(&item.ID, &item.Keyword, &item.Action, &item.Scope, &item.Enabled); err != nil {
+		if err := rows.Scan(&item.ID, &item.Keyword, &item.Action, &item.Scope, &item.Mode, &item.Enabled); err != nil {
 			return nil, err
 		}
 		result = append(result, item)
@@ -148,15 +148,17 @@ func (p *Postgres) Policies() ([]Policy, error) {
 func (p *Postgres) AddPolicy(item Policy) (int64, error) {
 	ctx, cancel := dbContext()
 	defer cancel()
+	normalizePolicy(&item)
 	var id int64
-	err := p.pool.QueryRow(ctx, "INSERT INTO policies(keyword,action,scope,enabled) VALUES($1,$2,$3,$4) RETURNING id", item.Keyword, item.Action, item.Scope, item.Enabled).Scan(&id)
+	err := p.pool.QueryRow(ctx, "INSERT INTO policies(keyword,action,scope,mode,enabled) VALUES($1,$2,$3,$4,$5) RETURNING id", item.Keyword, item.Action, item.Scope, item.Mode, item.Enabled).Scan(&id)
 	return id, err
 }
 
 func (p *Postgres) UpdatePolicy(id int64, item Policy) error {
 	ctx, cancel := dbContext()
 	defer cancel()
-	result, err := p.pool.Exec(ctx, "UPDATE policies SET keyword=$2,action=$3,scope=$4,enabled=$5,updated_at=now() WHERE id=$1", id, item.Keyword, item.Action, item.Scope, item.Enabled)
+	normalizePolicy(&item)
+	result, err := p.pool.Exec(ctx, "UPDATE policies SET keyword=$2,action=$3,scope=$4,mode=$5,enabled=$6,updated_at=now() WHERE id=$1", id, item.Keyword, item.Action, item.Scope, item.Mode, item.Enabled)
 	if err != nil {
 		return err
 	}

@@ -35,7 +35,10 @@ type Policy struct {
 	Keyword string `json:"keyword"`
 	Action  string `json:"action"`
 	Scope   string `json:"scope"`
-	Enabled bool   `json:"enabled"`
+	Mode    string `json:"mode"`
+	// Enabled is kept in the JSON and SQL stores for compatibility with
+	// pre-0.6 data. Mode is the authoritative lifecycle field.
+	Enabled bool `json:"enabled"`
 }
 type Audit struct {
 	ID             int64    `json:"id"`
@@ -129,6 +132,9 @@ func (s *Store) normalize() {
 	}
 	if s.state.Events == nil {
 		s.state.Events = []map[string]any{}
+	}
+	for i := range s.state.Policies {
+		normalizePolicy(&s.state.Policies[i])
 	}
 	for i := range s.state.Audits {
 		if s.state.Audits[i].TransferStatus == "" {
@@ -230,6 +236,7 @@ func (s *Store) Policies() ([]Policy, error) {
 func (s *Store) AddPolicy(p Policy) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	normalizePolicy(&p)
 	p.ID = s.nextIDLocked("policy")
 	s.state.Policies = append(s.state.Policies, p)
 	return p.ID, s.persistLocked()
@@ -237,6 +244,7 @@ func (s *Store) AddPolicy(p Policy) (int64, error) {
 func (s *Store) UpdatePolicy(id int64, p Policy) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	normalizePolicy(&p)
 	for i := range s.state.Policies {
 		if s.state.Policies[i].ID == id {
 			p.ID = id
@@ -245,6 +253,21 @@ func (s *Store) UpdatePolicy(id int64, p Policy) error {
 		}
 	}
 	return errors.New("policy not found")
+}
+
+func normalizePolicy(p *Policy) {
+	switch p.Mode {
+	case "draft":
+		p.Enabled = false
+	case "monitor", "enforce":
+		p.Enabled = true
+	default:
+		if p.Enabled {
+			p.Mode = "enforce"
+		} else {
+			p.Mode = "draft"
+		}
+	}
 }
 func (s *Store) Approved(actor, destination, sha string) (bool, error) {
 	s.mu.RLock()

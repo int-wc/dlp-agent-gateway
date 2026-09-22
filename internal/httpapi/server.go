@@ -92,7 +92,7 @@ func (s *Server) routes() {
 }
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
-		"status": "ok", "version": "0.5.0", "analyzer_enabled": s.cfg.AnalyzerURL != "", "model_enabled": s.cfg.OllamaModel != "",
+		"status": "ok", "version": "0.6.0", "analyzer_enabled": s.cfg.AnalyzerURL != "", "model_enabled": s.cfg.OllamaModel != "",
 		"storage": s.cfg.StorageBackend(), "oidc_enabled": s.cfg.OIDCEnabled(), "mtls_required": s.cfg.RequireMTLS,
 	})
 }
@@ -335,28 +335,18 @@ func (s *Server) addPolicy(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOK(w, r) {
 		return
 	}
-	var payload struct {
-		Keyword string `json:"keyword"`
-		Action  string `json:"action"`
-		Scope   string `json:"scope"`
-		Enabled *bool  `json:"enabled"`
-	}
-	if !decodeJSON(r, &payload) || len([]rune(strings.TrimSpace(payload.Keyword))) < 2 || !validActionScope(payload.Action, payload.Scope) {
+	p, ok := readPolicy(r)
+	if !ok {
 		writeError(w, 400, "invalid_policy")
 		return
 	}
-	enabled := true
-	if payload.Enabled != nil {
-		enabled = *payload.Enabled
-	}
-	p := store.Policy{Keyword: strings.TrimSpace(payload.Keyword), Action: payload.Action, Scope: payload.Scope, Enabled: enabled}
 	id, err := s.store.AddPolicy(p)
 	if err != nil {
 		writeError(w, 500, "policy_failed")
 		return
 	}
 	_ = s.store.Event("policy_created", strconv.FormatInt(id, 10))
-	writeJSON(w, 201, map[string]any{"id": id})
+	writeJSON(w, 201, map[string]any{"id": id, "mode": p.Mode})
 }
 func (s *Server) updatePolicy(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOK(w, r) {
@@ -367,18 +357,41 @@ func (s *Server) updatePolicy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid_id")
 		return
 	}
-	var p store.Policy
-	if !decodeJSON(r, &p) || len([]rune(strings.TrimSpace(p.Keyword))) < 2 || !validActionScope(p.Action, p.Scope) {
+	p, ok := readPolicy(r)
+	if !ok {
 		writeError(w, 400, "invalid_policy")
 		return
 	}
-	p.Keyword = strings.TrimSpace(p.Keyword)
 	if err := s.store.UpdatePolicy(id, p); err != nil {
 		writeError(w, 404, "policy_not_found")
 		return
 	}
-	_ = s.store.Event("policy_updated", strconv.FormatInt(id, 10))
-	writeJSON(w, 200, map[string]any{"id": id, "updated": true})
+	_ = s.store.Event("policy_updated", strconv.FormatInt(id, 10)+":"+p.Mode)
+	writeJSON(w, 200, map[string]any{"id": id, "mode": p.Mode, "updated": true})
+}
+
+func readPolicy(r *http.Request) (store.Policy, bool) {
+	var payload struct {
+		Keyword string `json:"keyword"`
+		Action  string `json:"action"`
+		Scope   string `json:"scope"`
+		Mode    string `json:"mode"`
+		Enabled *bool  `json:"enabled"`
+	}
+	if !decodeJSON(r, &payload) || len([]rune(strings.TrimSpace(payload.Keyword))) < 2 || !validActionScope(payload.Action, payload.Scope) {
+		return store.Policy{}, false
+	}
+	mode := payload.Mode
+	if mode == "" {
+		mode = "enforce"
+		if payload.Enabled != nil && !*payload.Enabled {
+			mode = "draft"
+		}
+	}
+	if !validPolicyMode(mode) {
+		return store.Policy{}, false
+	}
+	return store.Policy{Keyword: strings.TrimSpace(payload.Keyword), Action: payload.Action, Scope: payload.Scope, Mode: mode, Enabled: mode != "draft"}, true
 }
 func (s *Server) adminUsers(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOK(w, r) {
@@ -873,6 +886,9 @@ func queryInt(r *http.Request, name string, fallback int) int {
 }
 func validActionScope(action, scope string) bool {
 	return (action == "block" || action == "review") && (scope == "all" || scope == "internal" || scope == "external")
+}
+func validPolicyMode(value string) bool {
+	return value == "draft" || value == "monitor" || value == "enforce"
 }
 func validStatus(value string) bool {
 	return value == "normal" || value == "privileged" || value == "departing"

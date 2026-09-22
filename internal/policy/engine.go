@@ -41,6 +41,7 @@ func (e *Engine) AnalyzerReady(ctx context.Context) bool {
 func (e *Engine) Inspect(ctx context.Context, data []byte, filename string, destination config.Destination, actorStatus string, policies []store.Policy, approved bool) Decision {
 	analysis := e.Analyzer.Analyze(ctx, filename, data)
 	hard, soft := []string{}, []string{}
+	signals := append([]string{}, analysis.Signals...)
 	if analysis.ParserStatus != "ok" {
 		soft = append(soft, "unparseable_or_unsupported")
 	}
@@ -57,7 +58,19 @@ func (e *Engine) Inspect(ctx context.Context, data []byte, filename string, dest
 		soft = append(soft, "privileged_external")
 	}
 	for _, item := range policies {
-		if item.Enabled && item.Keyword != "" && strings.Contains(strings.ToLower(analysis.Text), strings.ToLower(item.Keyword)) && (item.Scope == "all" || item.Scope == destination.Kind) {
+		mode := item.Mode
+		if mode == "" && item.Enabled {
+			mode = "enforce"
+		}
+		matched := item.Keyword != "" && strings.Contains(strings.ToLower(analysis.Text), strings.ToLower(item.Keyword)) && (item.Scope == "all" || item.Scope == destination.Kind)
+		if !matched {
+			continue
+		}
+		if mode == "monitor" {
+			signals = append(signals, "policy_monitor_"+itoa(item.ID))
+			continue
+		}
+		if mode == "enforce" {
 			if item.Action == "block" {
 				hard = append(hard, "policy_"+itoa(item.ID))
 			} else {
@@ -90,7 +103,7 @@ func (e *Engine) Inspect(ctx context.Context, data []byte, filename string, dest
 	if model == "" {
 		model = "disabled"
 	}
-	return Decision{Action: decision, Reasons: reasons, Signals: analysis.Signals, ModelStatus: model}
+	return Decision{Action: decision, Reasons: reasons, Signals: unique(signals), ModelStatus: model}
 }
 
 func (e *Engine) modelReview(ctx context.Context, text, destinationKind string) (string, string) {
