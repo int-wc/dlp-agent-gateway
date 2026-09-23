@@ -37,7 +37,9 @@ chmod 600 -- "$backup_dir/postgres.dump"
 
 go test ./...
 go build -trimpath -o "$backup_dir/dlp-gateway.next" ./cmd/dlp-gateway
+go build -trimpath -o "$backup_dir/dlp-feishu-audit-sync.next" ./cmd/dlp-feishu-audit-sync
 install -m 700 -- "$backup_dir/dlp-gateway.next" bin/dlp-gateway.next
+install -m 700 -- "$backup_dir/dlp-feishu-audit-sync.next" bin/dlp-feishu-audit-sync
 activated=0
 restore_on_error() {
   failure_status=$?

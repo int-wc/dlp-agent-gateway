@@ -1,4 +1,4 @@
-import type { AdminEvent, Audit, AuditPage, AuditQuery, DestinationInfo, ExceptionRequest, Feedback, Health, Incident, IncidentNote, Policy, PolicyPreview, PolicyRevision, Report, Session, UserRisk } from './types'
+import type { AdminEvent, Audit, AuditPage, AuditQuery, DestinationInfo, ExceptionRequest, Feedback, FeishuAuditEvent, FeishuSyncStatus, Health, Incident, IncidentNote, Policy, PolicyPreview, PolicyRevision, Report, Session, UserRisk } from './types'
 
 let adminToken = ''
 
@@ -63,6 +63,8 @@ export const getIncidents = () => api<Incident[]>('/v1/admin/incidents')
 export const getIncidentNotes = (auditID: number) => api<IncidentNote[]>(`/v1/admin/incidents/${auditID}/notes`)
 export const getReport = (days: number) => api<Report>(`/v1/admin/report?days=${days}`)
 export const getEvents = () => api<AdminEvent[]>('/v1/admin/events')
+export const getFeishuAuditEvents = () => api<FeishuAuditEvent[]>('/v1/admin/feishu/events?limit=50')
+export const getFeishuSyncStatus = () => api<FeishuSyncStatus>('/v1/admin/feishu/status')
 
 export async function clientJSON<T>(path: string, token: string): Promise<T> {
   const response = await fetch(path, { headers: { Authorization: 'Bearer ' + token }, credentials: 'same-origin' })

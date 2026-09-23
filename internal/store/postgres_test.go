@@ -19,7 +19,7 @@ func TestPostgresRepositoryWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer repository.Close()
-	if _, err := repository.pool.Exec(ctx, "TRUNCATE policy_revisions,incident_notes,incidents,admin_events,feedback,exceptions,audits,policies,user_statuses RESTART IDENTITY CASCADE"); err != nil {
+	if _, err := repository.pool.Exec(ctx, "TRUNCATE feishu_audit_events,feishu_sync_state,policy_revisions,incident_notes,incidents,admin_events,feedback,exceptions,audits,policies,user_statuses RESTART IDENTITY CASCADE"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -99,5 +99,23 @@ func TestPostgresRepositoryWorkflow(t *testing.T) {
 	}
 	if events, err := repository.Events(); err != nil || len(events) != 1 {
 		t.Fatalf("events=%v err=%v", events, err)
+	}
+	feishuEvent := FeishuEvent{UniqueID: "synthetic-feishu-1", EventTime: time.Now().UTC().Format(time.RFC3339), EventName: "space_export_doc", EventModule: 1, OperatorType: 1, OperatorValue: "ou_synthetic", ObjectType: "106", ObjectValue: "doc_synthetic"}
+	end := time.Now().UTC()
+	inserted, err := repository.SaveFeishuEvents(ctx, []FeishuEvent{feishuEvent}, end)
+	if err != nil || inserted != 1 {
+		t.Fatalf("Feishu insert=%d err=%v", inserted, err)
+	}
+	inserted, err = repository.SaveFeishuEvents(ctx, []FeishuEvent{feishuEvent}, end)
+	if err != nil || inserted != 0 {
+		t.Fatalf("Feishu duplicate insert=%d err=%v", inserted, err)
+	}
+	feishuItems, err := repository.FeishuEvents(10)
+	if err != nil || len(feishuItems) != 1 || feishuItems[0].UniqueID != feishuEvent.UniqueID {
+		t.Fatalf("Feishu events=%v err=%v", feishuItems, err)
+	}
+	feishuStatus, err := repository.FeishuSyncStatus()
+	if err != nil || feishuStatus.ImportedTotal != 1 || feishuStatus.LastEnd == "" {
+		t.Fatalf("Feishu status=%v err=%v", feishuStatus, err)
 	}
 }

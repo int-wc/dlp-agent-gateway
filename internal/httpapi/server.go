@@ -95,10 +95,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /v1/admin/audits/{id}/feedback", s.feedback)
 	s.mux.HandleFunc("GET /v1/admin/report", s.report)
 	s.mux.HandleFunc("GET /v1/admin/events", s.events)
+	s.mux.HandleFunc("GET /v1/admin/feishu/events", s.feishuEvents)
+	s.mux.HandleFunc("GET /v1/admin/feishu/status", s.feishuStatus)
 }
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
-		"status": "ok", "version": "0.8.0", "analyzer_enabled": s.cfg.AnalyzerURL != "", "model_enabled": s.cfg.OllamaModel != "",
+		"status": "ok", "version": "0.9.0", "analyzer_enabled": s.cfg.AnalyzerURL != "", "model_enabled": s.cfg.OllamaModel != "",
 		"storage": s.cfg.StorageBackend(), "oidc_enabled": s.cfg.OIDCEnabled(), "mtls_required": s.cfg.RequireMTLS,
 	})
 }

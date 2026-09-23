@@ -106,11 +106,15 @@ func adminRequest(t *testing.T, method, url string, body io.Reader) *http.Respon
 
 func TestEmptyAdminCollectionsAndConsoleAreUsable(t *testing.T) {
 	srv := newTestServer(t)
-	for _, endpoint := range []string{"/v1/admin/audits", "/v1/admin/policies", "/v1/admin/exceptions", "/v1/admin/events", "/v1/admin/feedback", "/v1/admin/incidents"} {
+	for _, endpoint := range []string{"/v1/admin/audits", "/v1/admin/policies", "/v1/admin/exceptions", "/v1/admin/events", "/v1/admin/feedback", "/v1/admin/incidents", "/v1/admin/feishu/events"} {
 		items := bodyJSONArray(t, adminRequest(t, http.MethodGet, srv.URL+endpoint, nil))
 		if items == nil || len(items) != 0 {
 			t.Fatalf("%s=%v, want []", endpoint, items)
 		}
+	}
+	feishuStatus := bodyJSON(t, adminRequest(t, http.MethodGet, srv.URL+"/v1/admin/feishu/status", nil))
+	if feishuStatus["imported_total"] != float64(0) {
+		t.Fatalf("Feishu status=%v", feishuStatus)
 	}
 	report := bodyJSON(t, adminRequest(t, http.MethodGet, srv.URL+"/v1/admin/report", nil))
 	if report["total"] != float64(0) {
@@ -201,7 +205,7 @@ func TestGoGatewayHealthAndFailClosedDecisions(t *testing.T) {
 		t.Fatal(err)
 	}
 	health := bodyJSON(t, resp)
-	if health["status"] != "ok" || health["version"] != "0.8.0" {
+	if health["status"] != "ok" || health["version"] != "0.9.0" {
 		t.Fatalf("health=%v", health)
 	}
 	resp, err = http.Get(srv.URL + "/ready")

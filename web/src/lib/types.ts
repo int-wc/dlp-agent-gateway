@@ -157,3 +157,20 @@ export interface DestinationInfo {
   forwarding_configured: boolean
   upstream_auth: 'none' | 'bearer' | 'mtls'
 }
+
+export interface FeishuAuditEvent {
+  unique_id: string
+  event_time: string
+  event_name: string
+  event_module: number
+  operator_type: number
+  operator_value: string
+  object_type: string
+  object_value: string
+}
+
+export interface FeishuSyncStatus {
+  last_end?: string
+  updated_at?: string
+  imported_total: number
+}

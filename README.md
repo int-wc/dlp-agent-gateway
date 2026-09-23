@@ -38,6 +38,7 @@ Go Gateway (:18080)
 | 运营闭环 | PostgreSQL 自动迁移；内容判定与传输结果分开留痕；事件负责人、调查状态、多条调查记录、处置结论、临时例外和完整 1–90 天统计；审计日志支持服务端分页、时间/判定/关键字组合筛选与 CSV 导出。数据库状态读取失败时上传失败关闭。 |
 | 运营台与身份 | React + TypeScript + Ant Design + TanStack Query + ECharts；统一的扁平、低装饰运营界面；态势总览聚焦活跃风险、处置率、MTTR 与扫描覆盖；事件工作台提供证据时间线与调查闭环；集成页明确展示 API、文档、浏览器、邮件和端点等 XDLP 通道的覆盖边界；OIDC 授权码 + PKCE；`viewer`、`operator`、`admin` 三档 Casbin RBAC；静态管理员密钥仅作本地兼容。 |
 | 受控转发 | 只有调用 `/v1/forward/...`、判定为 `allow` 且目标预先配置时才转发；下游支持间接环境变量 Bearer 和 mTLS，禁止任意 URL与重定向。 |
+| 飞书行为审计 | 提供独立的只读同步命令，从获授权的飞书自建应用获取导出、下载、分享与权限变更等行为事件；按事件唯一 ID 去重，只保存最少元数据，控制台展示同步状态和最近事件。此能力是事后审计，不是飞书内容扫描或策略阻断。 |
 | 探针 | `/health` 报告存储、OIDC、mTLS、Analyzer 和模型模式；`/ready` 同时检查数据库和已配置 Analyzer。 |
 
 ### 快速开始
@@ -117,6 +118,8 @@ Compose 启动 Go Gateway、Python Analyzer 和 PostgreSQL。网关只映射到 
 
 管理员可向 `POST /v1/admin/policies/preview` 提交候选策略、目标类型和最多 4,096 字的**合成文本**。接口仅比较这条字面关键词策略在当前与候选配置下的效果，不写审计、不转发，也不调用解析器或模型；它不代表完整上传判定或真实流量影响。控制台在切换为强制模式前要求完成一次命中预览。
 
+飞书接入使用官方只读行为审计 API，独立同步命令不会影响上传判定。首次运行默认拉取最近一小时，之后从持久化游标重叠两分钟续传；成功完成一个时间窗后才推进游标。需要企业已获批的 `admin:audit_info:readonly` 权限以及私有自建应用凭据。配置和覆盖边界见 [飞书行为审计接入说明](docs/integrations/feishu-behavior-audit.md)。当前演示环境没有配置飞书租户凭据，也没有同步真实企业事件。
+
 默认目标 `internal-demo` 和 `external-demo` 仅检查。要接入获授权的业务上传接口，在私有配置中增加固定 URL，例如 `{"business-upload":{"kind":"internal","url":"https://business.example/upload","credential_env":"BUSINESS_UPLOAD_TOKEN","upload_field":"file"}}`。非本机目标必须使用 HTTPS。下游非 2xx、重定向或超时均不会标记为成功，也不会把下游响应正文返回客户端。
 
 ### 本地模型
@@ -145,6 +148,7 @@ GitHub Actions 同时构建前端、运行 Go race 测试（包含临时 Postgre
 - 应用会记录通过身份认证后的上传判定与早期拒绝；无法识别身份的鉴权失败不写入应用 JSON，以免匿名请求造成同步磁盘写入型拒绝服务。生产环境应由限流的入口代理或 SIEM 记录这类访问安全日志。
 - PDF 扫描页 OCR、XLSX/PPTX、嵌套压缩包、加密文档和复杂嵌入内容尚未覆盖，均应进入复核。格式提取不等于内容全覆盖。
 - 正则会误报，模型会误判或受文档中指令干扰。任何策略优化都应人工批准并经过回归测试。
+- 飞书行为审计仅是获授权租户的只读事件元数据；事件发生后才可见，不能用于实时拦截。生产使用还需企业审计授权、数据保留与删除、访问控制和缺口监测。
 - 不要在公开 issue、日志、截图、提交或演示实例中使用真实企业文件、个人数据、密钥或客户数据。
 
 更多信任边界见 [SECURITY.md](SECURITY.md)。
@@ -194,6 +198,7 @@ The primary path is split by responsibility: `cmd/dlp-gateway` owns process life
 | Operations | Automatic PostgreSQL migrations; separate content and transfer outcomes; incident assignee, investigation status, multiple notes, disposition, scoped exceptions, and full-window 1–90-day reports. Audit logs support server-side pagination, combined time/action/keyword filters, and CSV export. Policy-state read failures fail closed. |
 | Console and identity | React + TypeScript + Ant Design + TanStack Query + ECharts with one consistent flat, low-decoration operations UI. The posture dashboard focuses on active risk, remediation rate, MTTR, and inspection coverage; the incident workbench provides an evidence timeline and investigation loop; the integration page makes XDLP coverage boundaries explicit across API, document, browser, email, and endpoint channels. OIDC uses authorization code + PKCE; Casbin supplies `viewer`, `operator`, and `admin` roles; a static admin key remains only for local compatibility. |
 | Controlled forwarding | `/v1/forward/...` requires `allow` and a preconfigured target. Connectors support indirect environment-variable Bearer credentials and mTLS. Arbitrary URLs and redirects are rejected. |
+| Feishu behavior audit | A separate read-only sync command imports authorized export, download, sharing, and permission-change events, deduplicates by provider event ID, stores a minimal metadata projection, and shows sync status and recent events in the console. This is retrospective audit, not Feishu content scanning or policy blocking. |
 | Probes | `/health` reports storage, OIDC, mTLS, Analyzer, and model modes. `/ready` checks the database and the configured Analyzer. |
 
 ### Quick start
@@ -273,6 +278,8 @@ For a personal demo host using a user-level systemd service, synchronize the exa
 
 Administrators can submit a proposed policy, destination kind, and up to 4,096 characters of **synthetic text** to `POST /v1/admin/policies/preview`. This compares only the literal policy's current and proposed effects; it writes no audit, forwards nothing, and invokes neither parser nor model. It is not a full upload decision or a measurement of real traffic impact. The console requires a matching preview before switching to enforce mode.
 
+Feishu integration uses the official read-only behavior-audit API through a separate sync command and does not affect upload decisions. The first run reads the previous hour; later runs overlap the durable cursor by two minutes and advance it only after a complete window succeeds. An approved custom app with `admin:audit_info:readonly` and private credentials is required. See the [Feishu behavior-audit integration guide](docs/integrations/feishu-behavior-audit.md). The demo deployment has no Feishu tenant credentials and contains no real enterprise events.
+
 The default `internal-demo` and `external-demo` destinations are check-only. To connect an authorized business upload endpoint, add a fixed private configuration such as `{"business-upload":{"kind":"internal","url":"https://business.example/upload","credential_env":"BUSINESS_UPLOAD_TOKEN","upload_field":"file"}}`. Non-loopback receivers require HTTPS. Downstream non-2xx responses, redirects, or timeouts are not marked successful, and downstream response bodies are never returned.
 
 ### Local model
@@ -301,6 +308,7 @@ GitHub Actions builds the frontend, runs Go race tests with an ephemeral Postgre
 - The application audits upload decisions and early rejections after actor authentication. Unattributable authentication failures are not synchronously persisted to JSON because anonymous traffic could otherwise cause disk-write denial of service. Use a rate-limited ingress proxy or SIEM for those access-security logs in production.
 - OCR for scanned PDF pages, XLSX/PPTX, nested archives, encrypted documents, and complex embedded content are not covered. Such inputs should require review. Format extraction is not proof of full content coverage.
 - Regex signals can produce false positives; models can misclassify or follow document-borne instructions. Policy changes require human approval and regression tests.
+- Feishu behavior audit is read-only event metadata from an authorized tenant. It is available only after an action occurs and cannot provide real-time blocking. Production use also needs enterprise audit authorization, retention/deletion controls, access control, and gap monitoring.
 - Never place real corporate documents, personal data, secrets, or customer-derived material in public issues, logs, screenshots, commits, or demo instances.
 
 See [SECURITY.md](SECURITY.md) for additional trust boundaries.

@@ -39,4 +39,7 @@ type Repository interface {
 	AddIncidentNote(auditID int64, author, body string) (int64, error)
 	Event(event, target string) error
 	Events() ([]map[string]any, error)
+	FeishuEvents(limit int) ([]FeishuEvent, error)
+	FeishuSyncStatus() (FeishuSyncStatus, error)
+	SaveFeishuEvents(context.Context, []FeishuEvent, time.Time) (int64, error)
 }
