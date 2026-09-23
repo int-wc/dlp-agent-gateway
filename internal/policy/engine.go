@@ -20,6 +20,25 @@ type Decision struct {
 	Signals     []string `json:"signals"`
 	ModelStatus string   `json:"model_status"`
 }
+type LiteralPreview struct {
+	Matched bool   `json:"matched"`
+	Effect  string `json:"effect"`
+}
+
+// PreviewLiteral evaluates one policy against caller-supplied synthetic text.
+// It does not inspect files, invoke the model, record an audit, or represent
+// the final gateway decision, which may be stricter due to hard guards.
+func PreviewLiteral(item store.Policy, sample, destinationKind string) LiteralPreview {
+	matched := item.Keyword != "" && (item.Scope == "all" || item.Scope == destinationKind) && strings.Contains(strings.ToLower(sample), strings.ToLower(item.Keyword))
+	if !matched || item.Mode == "draft" {
+		return LiteralPreview{Matched: matched, Effect: "none"}
+	}
+	if item.Mode == "monitor" {
+		return LiteralPreview{Matched: true, Effect: "monitor"}
+	}
+	return LiteralPreview{Matched: true, Effect: item.Action}
+}
+
 type Engine struct {
 	Analyzer    *analyzer.Client
 	OllamaModel string

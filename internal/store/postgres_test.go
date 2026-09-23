@@ -19,7 +19,7 @@ func TestPostgresRepositoryWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer repository.Close()
-	if _, err := repository.pool.Exec(ctx, "TRUNCATE incident_notes,incidents,admin_events,feedback,exceptions,audits,policies,user_statuses RESTART IDENTITY CASCADE"); err != nil {
+	if _, err := repository.pool.Exec(ctx, "TRUNCATE policy_revisions,incident_notes,incidents,admin_events,feedback,exceptions,audits,policies,user_statuses RESTART IDENTITY CASCADE"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -30,12 +30,27 @@ func TestPostgresRepositoryWorkflow(t *testing.T) {
 	if err != nil || status != "privileged" {
 		t.Fatalf("status=%q err=%v", status, err)
 	}
-	policyID, err := repository.AddPolicy(Policy{Keyword: "synthetic canary", Action: "review", Scope: "external", Mode: "monitor"})
-	if err != nil || policyID != 1 {
-		t.Fatalf("policy id=%d err=%v", policyID, err)
+	createdPolicy, err := repository.AddPolicy(Policy{Keyword: "synthetic canary", Action: "review", Scope: "external", Mode: "monitor"}, "synthetic-admin")
+	if err != nil || createdPolicy.ID != 1 || createdPolicy.Version != 1 {
+		t.Fatalf("policy=%v err=%v", createdPolicy, err)
 	}
 	if policies, err := repository.Policies(); err != nil || len(policies) != 1 || policies[0].Mode != "monitor" || !policies[0].Enabled {
 		t.Fatalf("policies=%v err=%v", policies, err)
+	}
+	changedPolicy, err := repository.UpdatePolicy(createdPolicy.ID, Policy{Keyword: "synthetic canary", Action: "block", Scope: "external", Mode: "enforce"}, 1, "synthetic-admin")
+	if err != nil || changedPolicy.Version != 2 {
+		t.Fatalf("changed policy=%v err=%v", changedPolicy, err)
+	}
+	if _, err := repository.UpdatePolicy(createdPolicy.ID, changedPolicy, 1, "synthetic-admin"); err != ErrPolicyVersionConflict {
+		t.Fatalf("stale update err=%v", err)
+	}
+	restoredPolicy, err := repository.RollbackPolicy(createdPolicy.ID, 1, 2, "synthetic-admin")
+	if err != nil || restoredPolicy.Version != 3 || restoredPolicy.Mode != "monitor" {
+		t.Fatalf("restored policy=%v err=%v", restoredPolicy, err)
+	}
+	versions, err := repository.PolicyVersions(createdPolicy.ID)
+	if err != nil || len(versions) != 3 || versions[0].ChangeType != "rollback" || versions[1].Mode != "enforce" {
+		t.Fatalf("versions=%v err=%v", versions, err)
 	}
 	auditID, err := repository.InsertAudit(Audit{Actor: "synthetic-user", Destination: "external", Filename: "synthetic.txt", SHA256: "abc", Size: 12, Action: "review", Reasons: []string{"policy_1"}, Signals: []string{}, ModelStatus: "disabled"})
 	if err != nil || auditID != 1 {

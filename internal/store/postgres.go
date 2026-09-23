@@ -129,7 +129,7 @@ func sortStrings(values []string) {
 func (p *Postgres) Policies() ([]Policy, error) {
 	ctx, cancel := dbContext()
 	defer cancel()
-	rows, err := p.pool.Query(ctx, "SELECT id,keyword,action,scope,mode,enabled FROM policies ORDER BY id")
+	rows, err := p.pool.Query(ctx, "SELECT id,version,keyword,action,scope,mode,enabled FROM policies ORDER BY id")
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +137,7 @@ func (p *Postgres) Policies() ([]Policy, error) {
 	result := []Policy{}
 	for rows.Next() {
 		var item Policy
-		if err := rows.Scan(&item.ID, &item.Keyword, &item.Action, &item.Scope, &item.Mode, &item.Enabled); err != nil {
+		if err := rows.Scan(&item.ID, &item.Version, &item.Keyword, &item.Action, &item.Scope, &item.Mode, &item.Enabled); err != nil {
 			return nil, err
 		}
 		result = append(result, item)
@@ -145,27 +145,124 @@ func (p *Postgres) Policies() ([]Policy, error) {
 	return result, rows.Err()
 }
 
-func (p *Postgres) AddPolicy(item Policy) (int64, error) {
+func (p *Postgres) AddPolicy(item Policy, actor string) (Policy, error) {
 	ctx, cancel := dbContext()
 	defer cancel()
 	normalizePolicy(&item)
-	var id int64
-	err := p.pool.QueryRow(ctx, "INSERT INTO policies(keyword,action,scope,mode,enabled) VALUES($1,$2,$3,$4,$5) RETURNING id", item.Keyword, item.Action, item.Scope, item.Mode, item.Enabled).Scan(&id)
-	return id, err
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return Policy{}, err
+	}
+	defer tx.Rollback(ctx)
+	item.Version = 1
+	err = tx.QueryRow(ctx, "INSERT INTO policies(keyword,action,scope,mode,enabled) VALUES($1,$2,$3,$4,$5) RETURNING id", item.Keyword, item.Action, item.Scope, item.Mode, item.Enabled).Scan(&item.ID)
+	if err != nil {
+		return Policy{}, err
+	}
+	if err := insertPolicyRevision(ctx, tx, item, actor, "created"); err != nil {
+		return Policy{}, err
+	}
+	return item, tx.Commit(ctx)
 }
 
-func (p *Postgres) UpdatePolicy(id int64, item Policy) error {
+func (p *Postgres) UpdatePolicy(id int64, item Policy, expectedVersion int64, actor string) (Policy, error) {
 	ctx, cancel := dbContext()
 	defer cancel()
 	normalizePolicy(&item)
-	result, err := p.pool.Exec(ctx, "UPDATE policies SET keyword=$2,action=$3,scope=$4,mode=$5,enabled=$6,updated_at=now() WHERE id=$1", id, item.Keyword, item.Action, item.Scope, item.Mode, item.Enabled)
+	tx, err := p.pool.Begin(ctx)
 	if err != nil {
-		return err
+		return Policy{}, err
 	}
-	if result.RowsAffected() == 0 {
-		return errors.New("policy not found")
+	defer tx.Rollback(ctx)
+	var currentVersion int64
+	if err := tx.QueryRow(ctx, "SELECT version FROM policies WHERE id=$1 FOR UPDATE", id).Scan(&currentVersion); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Policy{}, ErrPolicyNotFound
+		}
+		return Policy{}, err
 	}
-	return nil
+	if currentVersion != expectedVersion {
+		return Policy{}, ErrPolicyVersionConflict
+	}
+	item.ID, item.Version = id, currentVersion+1
+	if _, err := tx.Exec(ctx, "UPDATE policies SET keyword=$2,action=$3,scope=$4,mode=$5,enabled=$6,version=$7,updated_at=now() WHERE id=$1", id, item.Keyword, item.Action, item.Scope, item.Mode, item.Enabled, item.Version); err != nil {
+		return Policy{}, err
+	}
+	if err := insertPolicyRevision(ctx, tx, item, actor, "updated"); err != nil {
+		return Policy{}, err
+	}
+	return item, tx.Commit(ctx)
+}
+
+func (p *Postgres) PolicyVersions(id int64) ([]PolicyRevision, error) {
+	ctx, cancel := dbContext()
+	defer cancel()
+	var exists bool
+	if err := p.pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM policies WHERE id=$1)", id).Scan(&exists); err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrPolicyNotFound
+	}
+	rows, err := p.pool.Query(ctx, "SELECT policy_id,version,keyword,action,scope,mode,changed_at,changed_by,change_type FROM policy_revisions WHERE policy_id=$1 ORDER BY version DESC", id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []PolicyRevision{}
+	for rows.Next() {
+		var item PolicyRevision
+		var changedAt time.Time
+		if err := rows.Scan(&item.PolicyID, &item.Version, &item.Keyword, &item.Action, &item.Scope, &item.Mode, &changedAt, &item.ChangedBy, &item.ChangeType); err != nil {
+			return nil, err
+		}
+		item.ChangedAt = changedAt.UTC().Format(time.RFC3339)
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (p *Postgres) RollbackPolicy(id, targetVersion, expectedVersion int64, actor string) (Policy, error) {
+	ctx, cancel := dbContext()
+	defer cancel()
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return Policy{}, err
+	}
+	defer tx.Rollback(ctx)
+	var currentVersion int64
+	if err := tx.QueryRow(ctx, "SELECT version FROM policies WHERE id=$1 FOR UPDATE", id).Scan(&currentVersion); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Policy{}, ErrPolicyNotFound
+		}
+		return Policy{}, err
+	}
+	if currentVersion != expectedVersion {
+		return Policy{}, ErrPolicyVersionConflict
+	}
+	item := Policy{ID: id, Version: currentVersion + 1}
+	if err := tx.QueryRow(ctx, "SELECT keyword,action,scope,mode FROM policy_revisions WHERE policy_id=$1 AND version=$2", id, targetVersion).Scan(&item.Keyword, &item.Action, &item.Scope, &item.Mode); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Policy{}, ErrPolicyNotFound
+		}
+		return Policy{}, err
+	}
+	normalizePolicy(&item)
+	if _, err := tx.Exec(ctx, "UPDATE policies SET keyword=$2,action=$3,scope=$4,mode=$5,enabled=$6,version=$7,updated_at=now() WHERE id=$1", id, item.Keyword, item.Action, item.Scope, item.Mode, item.Enabled, item.Version); err != nil {
+		return Policy{}, err
+	}
+	if err := insertPolicyRevision(ctx, tx, item, actor, "rollback"); err != nil {
+		return Policy{}, err
+	}
+	return item, tx.Commit(ctx)
+}
+
+func insertPolicyRevision(ctx context.Context, tx pgx.Tx, item Policy, actor, changeType string) error {
+	if actor == "" {
+		actor = "system"
+	}
+	_, err := tx.Exec(ctx, "INSERT INTO policy_revisions(policy_id,version,keyword,action,scope,mode,changed_by,change_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8)", item.ID, item.Version, item.Keyword, item.Action, item.Scope, item.Mode, actor, changeType)
+	return err
 }
 
 func (p *Postgres) Approved(actor, destination, sha string) (bool, error) {

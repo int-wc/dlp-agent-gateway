@@ -34,11 +34,31 @@ export interface AuditPage {
 
 export interface Policy {
   id: number
+  version: number
   keyword: string
   action: 'review' | 'block'
   scope: 'all' | 'internal' | 'external'
   mode: 'draft' | 'monitor' | 'enforce'
   enabled: boolean
+}
+
+export interface PolicyRevision {
+  policy_id: number
+  version: number
+  keyword: string
+  action: 'review' | 'block'
+  scope: 'all' | 'internal' | 'external'
+  mode: 'draft' | 'monitor' | 'enforce'
+  changed_at: string
+  changed_by: string
+  change_type: 'migration' | 'created' | 'updated' | 'rollback'
+}
+
+export interface PolicyPreview {
+  current: { matched: boolean; effect: string } | null
+  proposed: { matched: boolean; effect: string }
+  sample_only: boolean
+  note: string
 }
 
 export interface ExceptionRequest {

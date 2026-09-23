@@ -15,8 +15,10 @@ type Repository interface {
 	SetUserStatus(actor, status string) error
 	Users(actors map[string]string) ([]map[string]string, error)
 	Policies() ([]Policy, error)
-	AddPolicy(Policy) (int64, error)
-	UpdatePolicy(int64, Policy) error
+	AddPolicy(Policy, string) (Policy, error)
+	UpdatePolicy(int64, Policy, int64, string) (Policy, error)
+	PolicyVersions(int64) ([]PolicyRevision, error)
+	RollbackPolicy(int64, int64, int64, string) (Policy, error)
 	Approved(actor, destination, sha string) (bool, error)
 	InsertAudit(Audit) (int64, error)
 	MarkDelivery(id int64, upstreamStatus *int, forwarded bool, transferStatus string) error

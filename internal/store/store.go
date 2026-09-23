@@ -24,6 +24,7 @@ type state struct {
 	NextIDs    map[string]int64   `json:"next_ids"`
 	Users      map[string]string  `json:"users"`
 	Policies   []Policy           `json:"policies"`
+	Revisions  []PolicyRevision   `json:"policy_revisions"`
 	Audits     []Audit            `json:"audits"`
 	Exceptions []Exception        `json:"exceptions"`
 	Feedback   map[int64]Feedback `json:"feedback"`
@@ -33,6 +34,7 @@ type state struct {
 }
 type Policy struct {
 	ID      int64  `json:"id"`
+	Version int64  `json:"version"`
 	Keyword string `json:"keyword"`
 	Action  string `json:"action"`
 	Scope   string `json:"scope"`
@@ -41,6 +43,21 @@ type Policy struct {
 	// pre-0.6 data. Mode is the authoritative lifecycle field.
 	Enabled bool `json:"enabled"`
 }
+type PolicyRevision struct {
+	PolicyID   int64  `json:"policy_id"`
+	Version    int64  `json:"version"`
+	Keyword    string `json:"keyword"`
+	Action     string `json:"action"`
+	Scope      string `json:"scope"`
+	Mode       string `json:"mode"`
+	ChangedAt  string `json:"changed_at"`
+	ChangedBy  string `json:"changed_by"`
+	ChangeType string `json:"change_type"`
+}
+
+var ErrPolicyNotFound = errors.New("policy not found")
+var ErrPolicyVersionConflict = errors.New("policy version conflict")
+
 type Audit struct {
 	ID             int64    `json:"id"`
 	CreatedAt      string   `json:"created_at"`
@@ -138,6 +155,9 @@ func (s *Store) normalize() {
 	if s.state.Policies == nil {
 		s.state.Policies = []Policy{}
 	}
+	if s.state.Revisions == nil {
+		s.state.Revisions = []PolicyRevision{}
+	}
 	if s.state.Audits == nil {
 		s.state.Audits = []Audit{}
 	}
@@ -149,6 +169,19 @@ func (s *Store) normalize() {
 	}
 	for i := range s.state.Policies {
 		normalizePolicy(&s.state.Policies[i])
+		if s.state.Policies[i].Version < 1 {
+			s.state.Policies[i].Version = 1
+		}
+		found := false
+		for _, revision := range s.state.Revisions {
+			if revision.PolicyID == s.state.Policies[i].ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			s.state.Revisions = append(s.state.Revisions, revisionFromPolicy(s.state.Policies[i], "system", "migration"))
+		}
 	}
 	for i := range s.state.Audits {
 		if s.state.Audits[i].TransferStatus == "" {
@@ -247,26 +280,107 @@ func (s *Store) Policies() ([]Policy, error) {
 	copy(result, s.state.Policies)
 	return result, nil
 }
-func (s *Store) AddPolicy(p Policy) (int64, error) {
+func (s *Store) AddPolicy(p Policy, actor string) (Policy, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	previousPolicies := append([]Policy(nil), s.state.Policies...)
+	previousRevisions := append([]PolicyRevision(nil), s.state.Revisions...)
+	previousID := s.state.NextIDs["policy"]
 	normalizePolicy(&p)
 	p.ID = s.nextIDLocked("policy")
+	p.Version = 1
 	s.state.Policies = append(s.state.Policies, p)
-	return p.ID, s.persistLocked()
+	s.state.Revisions = append(s.state.Revisions, revisionFromPolicy(p, actor, "created"))
+	if err := s.persistLocked(); err != nil {
+		s.state.Policies, s.state.Revisions = previousPolicies, previousRevisions
+		s.state.NextIDs["policy"] = previousID
+		return Policy{}, err
+	}
+	return p, nil
 }
-func (s *Store) UpdatePolicy(id int64, p Policy) error {
+func (s *Store) UpdatePolicy(id int64, p Policy, expectedVersion int64, actor string) (Policy, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	normalizePolicy(&p)
 	for i := range s.state.Policies {
 		if s.state.Policies[i].ID == id {
+			if s.state.Policies[i].Version != expectedVersion {
+				return Policy{}, ErrPolicyVersionConflict
+			}
+			previous := s.state.Policies[i]
+			previousRevisions := append([]PolicyRevision(nil), s.state.Revisions...)
 			p.ID = id
+			p.Version = expectedVersion + 1
 			s.state.Policies[i] = p
-			return s.persistLocked()
+			s.state.Revisions = append(s.state.Revisions, revisionFromPolicy(p, actor, "updated"))
+			if err := s.persistLocked(); err != nil {
+				s.state.Policies[i], s.state.Revisions = previous, previousRevisions
+				return Policy{}, err
+			}
+			return p, nil
 		}
 	}
-	return errors.New("policy not found")
+	return Policy{}, ErrPolicyNotFound
+}
+
+func (s *Store) PolicyVersions(id int64) ([]PolicyRevision, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	found := false
+	for _, p := range s.state.Policies {
+		if p.ID == id {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, ErrPolicyNotFound
+	}
+	result := []PolicyRevision{}
+	for i := len(s.state.Revisions) - 1; i >= 0; i-- {
+		if s.state.Revisions[i].PolicyID == id {
+			result = append(result, s.state.Revisions[i])
+		}
+	}
+	return result, nil
+}
+
+func (s *Store) RollbackPolicy(id, targetVersion, expectedVersion int64, actor string) (Policy, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.state.Policies {
+		if s.state.Policies[i].ID != id {
+			continue
+		}
+		if s.state.Policies[i].Version != expectedVersion {
+			return Policy{}, ErrPolicyVersionConflict
+		}
+		for _, revision := range s.state.Revisions {
+			if revision.PolicyID != id || revision.Version != targetVersion {
+				continue
+			}
+			previous := s.state.Policies[i]
+			previousRevisions := append([]PolicyRevision(nil), s.state.Revisions...)
+			p := Policy{ID: id, Version: expectedVersion + 1, Keyword: revision.Keyword, Action: revision.Action, Scope: revision.Scope, Mode: revision.Mode}
+			normalizePolicy(&p)
+			s.state.Policies[i] = p
+			s.state.Revisions = append(s.state.Revisions, revisionFromPolicy(p, actor, "rollback"))
+			if err := s.persistLocked(); err != nil {
+				s.state.Policies[i], s.state.Revisions = previous, previousRevisions
+				return Policy{}, err
+			}
+			return p, nil
+		}
+		return Policy{}, ErrPolicyNotFound
+	}
+	return Policy{}, ErrPolicyNotFound
+}
+
+func revisionFromPolicy(p Policy, actor, changeType string) PolicyRevision {
+	if actor == "" {
+		actor = "system"
+	}
+	return PolicyRevision{PolicyID: p.ID, Version: p.Version, Keyword: p.Keyword, Action: p.Action, Scope: p.Scope, Mode: p.Mode, ChangedAt: now(), ChangedBy: actor, ChangeType: changeType}
 }
 
 func normalizePolicy(p *Policy) {

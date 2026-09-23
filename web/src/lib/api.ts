@@ -1,4 +1,4 @@
-import type { AdminEvent, Audit, AuditPage, AuditQuery, DestinationInfo, ExceptionRequest, Feedback, Health, Incident, IncidentNote, Policy, Report, Session, UserRisk } from './types'
+import type { AdminEvent, Audit, AuditPage, AuditQuery, DestinationInfo, ExceptionRequest, Feedback, Health, Incident, IncidentNote, Policy, PolicyPreview, PolicyRevision, Report, Session, UserRisk } from './types'
 
 let adminToken = ''
 
@@ -53,6 +53,9 @@ export async function downloadAuditCSV(query: AuditQuery) {
   URL.revokeObjectURL(url)
 }
 export const getPolicies = () => api<Policy[]>('/v1/admin/policies')
+export const getPolicyVersions = (id: number) => api<PolicyRevision[]>(`/v1/admin/policies/${id}/versions`)
+export const previewPolicy = (policy: Policy, sample: string, destinationKind: 'internal' | 'external') => api<PolicyPreview>('/v1/admin/policies/preview', { method: 'POST', body: JSON.stringify({ policy_id: policy.id, policy, sample, destination_kind: destinationKind }) })
+export const rollbackPolicy = (id: number, targetVersion: number, expectedVersion: number) => api<Policy>(`/v1/admin/policies/${id}/rollback`, { method: 'POST', body: JSON.stringify({ target_version: targetVersion, expected_version: expectedVersion }) })
 export const getUsers = () => api<UserRisk[]>('/v1/admin/users')
 export const getExceptions = () => api<ExceptionRequest[]>('/v1/admin/exceptions')
 export const getFeedback = () => api<Feedback[]>('/v1/admin/feedback')

@@ -78,7 +78,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/admin/audits/export", s.exportAudits)
 	s.mux.HandleFunc("GET /v1/admin/policies", s.adminPolicies)
 	s.mux.HandleFunc("POST /v1/admin/policies", s.addPolicy)
+	s.mux.HandleFunc("POST /v1/admin/policies/preview", s.previewPolicy)
 	s.mux.HandleFunc("PUT /v1/admin/policies/{id}", s.updatePolicy)
+	s.mux.HandleFunc("GET /v1/admin/policies/{id}/versions", s.policyVersions)
+	s.mux.HandleFunc("POST /v1/admin/policies/{id}/rollback", s.rollbackPolicy)
 	s.mux.HandleFunc("GET /v1/admin/users", s.adminUsers)
 	s.mux.HandleFunc("PUT /v1/admin/users/{actor}", s.updateUser)
 	s.mux.HandleFunc("GET /v1/admin/exceptions", s.adminExceptions)
@@ -95,7 +98,7 @@ func (s *Server) routes() {
 }
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
-		"status": "ok", "version": "0.7.0", "analyzer_enabled": s.cfg.AnalyzerURL != "", "model_enabled": s.cfg.OllamaModel != "",
+		"status": "ok", "version": "0.8.0", "analyzer_enabled": s.cfg.AnalyzerURL != "", "model_enabled": s.cfg.OllamaModel != "",
 		"storage": s.cfg.StorageBackend(), "oidc_enabled": s.cfg.OIDCEnabled(), "mtls_required": s.cfg.RequireMTLS,
 	})
 }
@@ -430,13 +433,14 @@ func (s *Server) addPolicy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid_policy")
 		return
 	}
-	id, err := s.store.AddPolicy(p)
+	_, actor, _ := s.adminPrincipal(r)
+	created, err := s.store.AddPolicy(p, actor)
 	if err != nil {
 		writeError(w, 500, "policy_failed")
 		return
 	}
-	_ = s.store.Event("policy_created", strconv.FormatInt(id, 10))
-	writeJSON(w, 201, map[string]any{"id": id, "mode": p.Mode})
+	_ = s.store.Event("policy_created", strconv.FormatInt(created.ID, 10))
+	writeJSON(w, 201, created)
 }
 func (s *Server) updatePolicy(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOK(w, r) {
@@ -448,27 +452,131 @@ func (s *Server) updatePolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p, ok := readPolicy(r)
-	if !ok {
+	if !ok || p.Version < 1 {
 		writeError(w, 400, "invalid_policy")
 		return
 	}
-	if err := s.store.UpdatePolicy(id, p); err != nil {
+	_, actor, _ := s.adminPrincipal(r)
+	updated, err := s.store.UpdatePolicy(id, p, p.Version, actor)
+	if errors.Is(err, store.ErrPolicyVersionConflict) {
+		writeError(w, 409, "policy_version_conflict")
+		return
+	}
+	if errors.Is(err, store.ErrPolicyNotFound) {
 		writeError(w, 404, "policy_not_found")
 		return
 	}
+	if err != nil {
+		writeError(w, 500, "policy_failed")
+		return
+	}
 	_ = s.store.Event("policy_updated", strconv.FormatInt(id, 10)+":"+p.Mode)
-	writeJSON(w, 200, map[string]any{"id": id, "mode": p.Mode, "updated": true})
+	writeJSON(w, 200, updated)
+}
+
+func (s *Server) policyVersions(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOK(w, r) {
+		return
+	}
+	id, ok := pathID(r, "id")
+	if !ok {
+		writeError(w, 400, "invalid_id")
+		return
+	}
+	versions, err := s.store.PolicyVersions(id)
+	if errors.Is(err, store.ErrPolicyNotFound) {
+		writeError(w, 404, "policy_not_found")
+		return
+	}
+	if err != nil {
+		writeError(w, 500, "query_failed")
+		return
+	}
+	writeJSON(w, 200, versions)
+}
+
+func (s *Server) rollbackPolicy(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOK(w, r) {
+		return
+	}
+	id, ok := pathID(r, "id")
+	if !ok {
+		writeError(w, 400, "invalid_id")
+		return
+	}
+	var payload struct {
+		TargetVersion   int64 `json:"target_version"`
+		ExpectedVersion int64 `json:"expected_version"`
+	}
+	if !decodeJSON(r, &payload) || payload.TargetVersion < 1 || payload.ExpectedVersion < 1 || payload.TargetVersion >= payload.ExpectedVersion {
+		writeError(w, 400, "invalid_policy_version")
+		return
+	}
+	_, actor, _ := s.adminPrincipal(r)
+	item, err := s.store.RollbackPolicy(id, payload.TargetVersion, payload.ExpectedVersion, actor)
+	if errors.Is(err, store.ErrPolicyVersionConflict) {
+		writeError(w, 409, "policy_version_conflict")
+		return
+	}
+	if errors.Is(err, store.ErrPolicyNotFound) {
+		writeError(w, 404, "policy_version_not_found")
+		return
+	}
+	if err != nil {
+		writeError(w, 500, "policy_failed")
+		return
+	}
+	_ = s.store.Event("policy_rollback", strconv.FormatInt(id, 10)+":"+strconv.FormatInt(payload.TargetVersion, 10))
+	writeJSON(w, 200, item)
+}
+
+func (s *Server) previewPolicy(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOK(w, r) {
+		return
+	}
+	var payload struct {
+		Policy          store.Policy `json:"policy"`
+		PolicyID        int64        `json:"policy_id"`
+		Sample          string       `json:"sample"`
+		DestinationKind string       `json:"destination_kind"`
+	}
+	if !decodeJSON(r, &payload) || !validPolicy(payload.Policy) || (payload.DestinationKind != "internal" && payload.DestinationKind != "external") || !utf8.ValidString(payload.Sample) || len([]rune(payload.Sample)) < 1 || len([]rune(payload.Sample)) > 4096 {
+		writeError(w, 400, "invalid_policy_preview")
+		return
+	}
+	proposed := policy.PreviewLiteral(payload.Policy, payload.Sample, payload.DestinationKind)
+	var current *policy.LiteralPreview
+	if payload.PolicyID > 0 {
+		items, err := s.store.Policies()
+		if err != nil {
+			writeError(w, 500, "query_failed")
+			return
+		}
+		for _, item := range items {
+			if item.ID == payload.PolicyID {
+				result := policy.PreviewLiteral(item, payload.Sample, payload.DestinationKind)
+				current = &result
+				break
+			}
+		}
+		if current == nil {
+			writeError(w, 404, "policy_not_found")
+			return
+		}
+	}
+	writeJSON(w, 200, map[string]any{"current": current, "proposed": proposed, "sample_only": true, "note": "Literal-policy sample preview only; hard guards, parser, model, exceptions, and real traffic are not evaluated."})
 }
 
 func readPolicy(r *http.Request) (store.Policy, bool) {
 	var payload struct {
+		Version int64  `json:"version"`
 		Keyword string `json:"keyword"`
 		Action  string `json:"action"`
 		Scope   string `json:"scope"`
 		Mode    string `json:"mode"`
 		Enabled *bool  `json:"enabled"`
 	}
-	if !decodeJSON(r, &payload) || len([]rune(strings.TrimSpace(payload.Keyword))) < 2 || !validActionScope(payload.Action, payload.Scope) {
+	if !decodeJSON(r, &payload) || len([]rune(strings.TrimSpace(payload.Keyword))) < 2 || len([]rune(strings.TrimSpace(payload.Keyword))) > 64 || !validActionScope(payload.Action, payload.Scope) {
 		return store.Policy{}, false
 	}
 	mode := payload.Mode
@@ -481,7 +589,12 @@ func readPolicy(r *http.Request) (store.Policy, bool) {
 	if !validPolicyMode(mode) {
 		return store.Policy{}, false
 	}
-	return store.Policy{Keyword: strings.TrimSpace(payload.Keyword), Action: payload.Action, Scope: payload.Scope, Mode: mode, Enabled: mode != "draft"}, true
+	return store.Policy{Version: payload.Version, Keyword: strings.TrimSpace(payload.Keyword), Action: payload.Action, Scope: payload.Scope, Mode: mode, Enabled: mode != "draft"}, true
+}
+
+func validPolicy(item store.Policy) bool {
+	keywordLength := len([]rune(strings.TrimSpace(item.Keyword)))
+	return keywordLength >= 2 && keywordLength <= 64 && validActionScope(item.Action, item.Scope) && validPolicyMode(item.Mode)
 }
 func (s *Server) adminUsers(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOK(w, r) {

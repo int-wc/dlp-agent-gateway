@@ -201,7 +201,7 @@ func TestGoGatewayHealthAndFailClosedDecisions(t *testing.T) {
 		t.Fatal(err)
 	}
 	health := bodyJSON(t, resp)
-	if health["status"] != "ok" || health["version"] != "0.7.0" {
+	if health["status"] != "ok" || health["version"] != "0.8.0" {
 		t.Fatalf("health=%v", health)
 	}
 	resp, err = http.Get(srv.URL + "/ready")
@@ -362,7 +362,7 @@ func TestPolicyLifecycleModes(t *testing.T) {
 		t.Fatalf("monitor decision=%v", monitored)
 	}
 
-	payload, _ = json.Marshal(map[string]any{"keyword": "monitor canary", "action": "block", "scope": "external", "mode": "enforce"})
+	payload, _ = json.Marshal(map[string]any{"version": 1, "keyword": "monitor canary", "action": "block", "scope": "external", "mode": "enforce"})
 	response := adminRequest(t, http.MethodPut, srv.URL+"/v1/admin/policies/"+strconv.FormatInt(policyID, 10), bytes.NewReader(payload))
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("enforce update status=%d body=%v", response.StatusCode, bodyJSON(t, response))
@@ -373,7 +373,7 @@ func TestPolicyLifecycleModes(t *testing.T) {
 		t.Fatalf("enforce decision=%v", enforced)
 	}
 
-	payload, _ = json.Marshal(map[string]any{"keyword": "monitor canary", "action": "block", "scope": "external", "mode": "draft"})
+	payload, _ = json.Marshal(map[string]any{"version": 2, "keyword": "monitor canary", "action": "block", "scope": "external", "mode": "draft"})
 	response = adminRequest(t, http.MethodPut, srv.URL+"/v1/admin/policies/"+strconv.FormatInt(policyID, 10), bytes.NewReader(payload))
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("draft update status=%d body=%v", response.StatusCode, bodyJSON(t, response))
@@ -382,6 +382,61 @@ func TestPolicyLifecycleModes(t *testing.T) {
 	draft := bodyJSON(t, upload(t, srv.URL, "/v1/check/external", "draft.txt", []byte("monitor canary synthetic"), clientKey))
 	if draft["action"] != "allow" || strings.Contains(strings.Join(anyStrings(draft["signals"]), ","), "policy_monitor_") {
 		t.Fatalf("draft decision=%v", draft)
+	}
+}
+
+func TestPolicyPreviewVersionsAndRollback(t *testing.T) {
+	srv := newTestServer(t)
+	createBody, _ := json.Marshal(map[string]any{"keyword": "synthetic-orbit", "action": "block", "scope": "external", "mode": "monitor"})
+	created := bodyJSON(t, adminRequest(t, http.MethodPost, srv.URL+"/v1/admin/policies", bytes.NewReader(createBody)))
+	id := int64(created["id"].(float64))
+	path := srv.URL + "/v1/admin/policies/" + strconv.FormatInt(id, 10)
+	if created["version"] != float64(1) {
+		t.Fatalf("created=%v", created)
+	}
+
+	previewBody, _ := json.Marshal(map[string]any{
+		"policy_id": id,
+		"policy":    map[string]any{"keyword": "synthetic-orbit", "action": "block", "scope": "external", "mode": "enforce"},
+		"sample":    "A synthetic-orbit test note", "destination_kind": "external",
+	})
+	preview := bodyJSON(t, adminRequest(t, http.MethodPost, srv.URL+"/v1/admin/policies/preview", bytes.NewReader(previewBody)))
+	if preview["current"].(map[string]any)["effect"] != "monitor" || preview["proposed"].(map[string]any)["effect"] != "block" {
+		t.Fatalf("preview=%v", preview)
+	}
+	page := bodyJSON(t, adminRequest(t, http.MethodGet, srv.URL+"/v1/admin/audits/query", nil))
+	if page["total"] != float64(0) {
+		t.Fatalf("preview wrote an audit: %v", page)
+	}
+
+	updateBody, _ := json.Marshal(map[string]any{"version": 1, "keyword": "synthetic-orbit", "action": "block", "scope": "external", "mode": "enforce"})
+	updated := bodyJSON(t, adminRequest(t, http.MethodPut, path, bytes.NewReader(updateBody)))
+	if updated["version"] != float64(2) {
+		t.Fatalf("updated=%v", updated)
+	}
+	response := adminRequest(t, http.MethodPut, path, bytes.NewReader(updateBody))
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("stale update status=%d", response.StatusCode)
+	}
+	response.Body.Close()
+
+	rollbackBody, _ := json.Marshal(map[string]any{"target_version": 1, "expected_version": 2})
+	restored := bodyJSON(t, adminRequest(t, http.MethodPost, path+"/rollback", bytes.NewReader(rollbackBody)))
+	if restored["version"] != float64(3) || restored["mode"] != "monitor" {
+		t.Fatalf("restored=%v", restored)
+	}
+	versions := bodyJSONArray(t, adminRequest(t, http.MethodGet, path+"/versions", nil))
+	if len(versions) != 3 || versions[0]["version"] != float64(3) || versions[0]["change_type"] != "rollback" || versions[1]["mode"] != "enforce" || versions[2]["mode"] != "monitor" {
+		t.Fatalf("versions=%v", versions)
+	}
+	response = adminRequest(t, http.MethodPost, path+"/rollback", bytes.NewReader(rollbackBody))
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("stale rollback status=%d", response.StatusCode)
+	}
+	response.Body.Close()
+	checked := bodyJSON(t, upload(t, srv.URL, "/v1/check/external", "synthetic.txt", []byte("synthetic-orbit content"), clientKey))
+	if checked["action"] != "allow" {
+		t.Fatalf("rollback decision=%v", checked)
 	}
 }
 
